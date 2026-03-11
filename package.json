@@ -1,11 +1,11 @@
 {
   "name": "agent-nexus",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "The central hub where your AI agents connect. Multi-terminal Claude Code agent communication via MCP.",
   "main": "./dist/index.js",
   "bin": {
-    "agent-nexus": "dist/cli.js",
-    "agent-nexus-server": "dist/index.js"
+    "agent-nexus": "./bin/cli.js",
+    "agent-nexus-server": "./bin/server.js"
   },
   "scripts": {
     "build": "tsc",
@@ -13,7 +13,8 @@
     "start": "node dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "bin"
   ],
   "keywords": [
     "claude",
