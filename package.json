@@ -1,0 +1,52 @@
+{
+  "name": "agent-nexus",
+  "version": "1.0.0",
+  "description": "The central hub where your AI agents connect. Multi-terminal Claude Code agent communication via MCP.",
+  "main": "./dist/index.js",
+  "bin": {
+    "agent-nexus": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "start": "node dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "ai-agents",
+    "multi-agent",
+    "agent-communication",
+    "model-context-protocol",
+    "ipc",
+    "terminal",
+    "iterm2"
+  ],
+  "author": "Jay Siddiqi (https://github.com/jaysidd)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaysidd/agent-nexus.git"
+  },
+  "homepage": "https://github.com/jaysidd/agent-nexus",
+  "bugs": {
+    "url": "https://github.com/jaysidd/agent-nexus/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "better-sqlite3": "^12.6.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0"
+  }
+}
