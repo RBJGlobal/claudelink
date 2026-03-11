@@ -115,6 +115,95 @@ agent-nexus reset           # Clear all data (fresh start)
 agent-nexus help            # Show help
 ```
 
+## Autonomous Mode (Recommended)
+
+By default, you'd have to tell Claude "check my inbox" manually every time. That defeats the purpose. With a simple configuration, agents communicate **autonomously** — checking for messages and sending updates on their own without you asking.
+
+### How It Works
+
+Add the AgentNexus instructions to your **global** `~/.claude/CLAUDE.md` file. This teaches every Claude Code session to:
+
+- **Check inbox automatically** before and after every task
+- **Send updates proactively** to other agents when work is completed
+- **Respond to messages immediately** without waiting for you to say "check inbox"
+- **Post to the bulletin board** when making decisions that affect the project
+
+### Setup
+
+Create or add to `~/.claude/CLAUDE.md`:
+
+```markdown
+## AgentNexus - Autonomous Agent Communication
+
+You are part of a multi-agent team. Other agents may be running in separate
+terminals and can send you messages at any time via AgentNexus.
+
+### Automatic Inbox Checking
+
+- BEFORE starting any task: Check your inbox using read_inbox first
+- AFTER completing any task: Check your inbox again using read_inbox
+- If you receive a message, acknowledge it and act on it before moving on
+- If a message requires you to change your current work, do so immediately
+- If a message is from another agent asking for information, respond using send
+  before continuing your own work
+- High-priority messages take precedence over your current task
+
+### Autonomous Collaboration
+
+- When you finish work that another agent might care about, proactively send
+  them an update
+- If you encounter a problem that another agent's role could help with, send
+  them a message
+- When you make a decision that affects the project, post it to the bulletin board
+- If you're blocked waiting for another agent, say so and check inbox again
+
+### Communication Shortcuts
+
+- "check response" or "check messages" — Use read_inbox to check for new messages
+- "ask the [role]" — Send a message to that role and check inbox for their reply
+- "tell the [role]" — Send a one-way message to that role
+- "who's online" — Use get_agents to list all connected agents
+- "update the board" — Use post_bulletin to post a status update
+- "check the board" — Use get_bulletin to read the bulletin board
+```
+
+### Per-Project vs Global
+
+| File | Applies to |
+|------|-----------|
+| `~/.claude/CLAUDE.md` | **Every project, every terminal** — recommended |
+| `your-project/CLAUDE.md` | Only that specific project |
+
+If you want autonomous mode everywhere (most people do), use the global file. If you only want it for specific projects, put it in the project's `CLAUDE.md`.
+
+### What Autonomous Mode Looks Like
+
+Without autonomous mode:
+```
+You: Fix the bug in auth.ts
+Claude: (fixes the bug)
+You: Now check your inbox
+Claude: You have 1 message from the reviewer...
+You: Send the reviewer an update
+Claude: Message sent.
+```
+
+With autonomous mode:
+```
+You: Fix the bug in auth.ts
+Claude: (checks inbox — sees a tip from the reviewer about the bug)
+       (fixes the bug using the reviewer's guidance)
+       (sends the reviewer: "Fixed it, here's what I changed...")
+       (posts to bulletin: "auth.ts bug fixed")
+       (checks inbox again — no new messages)
+       Done. I fixed the token validation bug. The reviewer had already
+       flagged the exact line, so I used their suggestion.
+```
+
+One instruction from you. All the communication happens automatically.
+
+---
+
 ## Use Cases
 
 ### Code Review Pipeline
