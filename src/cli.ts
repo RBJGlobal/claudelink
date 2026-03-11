@@ -11,6 +11,70 @@ const MCP_SERVER_CONFIG = {
   command: "agent-nexus-server",
 };
 
+const CLAUDE_MD_CONTENT = `
+## AgentNexus - Autonomous Agent Communication
+
+You are part of a multi-agent team. Other agents may be running in separate terminals and can send you messages at any time via AgentNexus.
+
+### Automatic Inbox Checking
+
+- **BEFORE starting any task**: Check your inbox using \`read_inbox\` first
+- **AFTER completing any task**: Check your inbox again using \`read_inbox\`
+- If you receive a message, acknowledge it and act on it before moving on
+- If a message requires you to change your current work, do so immediately
+- If a message is from another agent asking for information, respond using \`send\` before continuing your own work
+- High-priority messages take precedence over your current task
+
+### Autonomous Collaboration
+
+- When you finish work that another agent might care about, proactively send them an update
+- If you encounter a problem that another agent's role could help with, send them a message
+- When you make a decision that affects the project, post it to the bulletin board
+- If you're blocked waiting for another agent, say so and check inbox again
+
+### Communication Shortcuts
+
+- **"check response"** or **"check messages"** — Use \`read_inbox\` to check for new messages
+- **"ask the [role]"** — Send a message to that role and check inbox for their reply
+- **"tell the [role]"** — Send a one-way message to that role
+- **"who's online"** — Use \`get_agents\` to list all connected agents
+- **"update the board"** — Use \`post_bulletin\` to post a status update
+- **"check the board"** — Use \`get_bulletin\` to read the bulletin board
+`.trim();
+
+const CLAUDE_MD_MARKER = "## AgentNexus - Autonomous Agent Communication";
+
+function installClaudeMd(scope: "global" | "project") {
+  let claudeMdPath: string;
+
+  if (scope === "global") {
+    const claudeDir = path.join(os.homedir(), ".claude");
+    if (!fs.existsSync(claudeDir)) {
+      fs.mkdirSync(claudeDir, { recursive: true });
+    }
+    claudeMdPath = path.join(claudeDir, "CLAUDE.md");
+  } else {
+    claudeMdPath = path.join(process.cwd(), "CLAUDE.md");
+  }
+
+  // Check if CLAUDE.md exists and already has AgentNexus content
+  if (fs.existsSync(claudeMdPath)) {
+    const existing = fs.readFileSync(claudeMdPath, "utf-8");
+    if (existing.includes(CLAUDE_MD_MARKER)) {
+      console.log(`  CLAUDE.md already has AgentNexus instructions (${claudeMdPath})`);
+      return;
+    }
+    // Append to existing file
+    const separator = existing.endsWith("\n") ? "\n" : "\n\n";
+    fs.writeFileSync(claudeMdPath, existing + separator + CLAUDE_MD_CONTENT + "\n");
+    console.log(`  Added AgentNexus instructions to existing ${claudeMdPath}`);
+  } else {
+    // Create new file
+    fs.writeFileSync(claudeMdPath, "# Global Instructions\n\n" + CLAUDE_MD_CONTENT + "\n");
+    console.log(`  Created ${claudeMdPath} with AgentNexus instructions`);
+  }
+}
+
 function printBanner() {
   console.log(`
     ╔═══════════════════════════════════════════╗
@@ -53,8 +117,15 @@ function initProject() {
   fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n");
   console.log(`  Updated ${mcpJsonPath}`);
 
+  // Install CLAUDE.md with autonomous mode instructions
+  installClaudeMd("project");
+
   console.log(`
   AgentNexus is ready!
+
+  What was set up:
+    - .mcp.json: MCP server config (tells Claude Code to connect to AgentNexus)
+    - CLAUDE.md: Autonomous mode instructions (agents check inbox automatically)
 
   Next steps:
     1. Restart Claude Code in your terminals
@@ -80,15 +151,32 @@ function initGlobal() {
 
   // Use claude mcp add command for proper global registration
   const { execSync } = require("child_process");
+  let mcpSuccess = false;
   try {
     execSync("claude mcp add --scope user agent-nexus -- agent-nexus-server", {
       stdio: "inherit",
     });
+    mcpSuccess = true;
+  } catch {
+    console.log(`
+  Could not run "claude mcp add" automatically.
+
+  Run this command manually to add AgentNexus globally:
+
+    claude mcp add --scope user agent-nexus -- agent-nexus-server
+    `);
+  }
+
+  // Install global CLAUDE.md with autonomous mode instructions
+  installClaudeMd("global");
+
+  if (mcpSuccess) {
     console.log(`
   AgentNexus is ready (global install)!
 
-  The MCP server has been added to your user-level Claude Code config (~/.claude.json).
-  It will be available in ALL your Claude Code sessions, in every project.
+  What was set up:
+    - ~/.claude.json: MCP server config (available in ALL projects)
+    - ~/.claude/CLAUDE.md: Autonomous mode instructions (agents check inbox automatically)
 
   Next steps:
     1. Restart Claude Code in your terminals
@@ -99,16 +187,6 @@ function initGlobal() {
 
   Data stored in: ${NEXUS_DIR}/nexus.db
     `);
-  } catch {
-    console.log(`
-  Could not run "claude mcp add" automatically.
-
-  Run this command manually to add AgentNexus globally:
-
-    claude mcp add --scope user agent-nexus -- agent-nexus-server
-
-  Then restart your Claude Code sessions.
-    `);
   }
 }
 
@@ -117,8 +195,8 @@ function showHelp() {
   Usage: agent-nexus <command>
 
   Commands:
-    init          Add AgentNexus to .mcp.json in current project
-    init --global Add AgentNexus to global Claude Code settings
+    init          Add AgentNexus to .mcp.json in current project + CLAUDE.md
+    init --global Add AgentNexus globally + ~/.claude/CLAUDE.md
     status        Show registered agents and their status
     reset         Clear all messages and agent registrations
     help          Show this help message
