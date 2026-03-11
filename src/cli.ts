@@ -74,7 +74,7 @@ function initProject() {
 
 function initGlobal() {
   const claudeDir = path.join(os.homedir(), ".claude");
-  const settingsPath = path.join(claudeDir, "settings.json");
+  const mcpJsonPath = path.join(claudeDir, ".mcp.json");
 
   // Create ~/.agent-nexus directory
   if (!fs.existsSync(NEXUS_DIR)) {
@@ -82,17 +82,17 @@ function initGlobal() {
     console.log(`  Created ${NEXUS_DIR}/`);
   }
 
-  // Read or create settings.json
-  let settings: any = {};
+  // Read or create ~/.claude/.mcp.json
+  let mcpConfig: any = { mcpServers: {} };
 
-  if (fs.existsSync(settingsPath)) {
+  if (fs.existsSync(mcpJsonPath)) {
     try {
-      const content = fs.readFileSync(settingsPath, "utf-8");
-      settings = JSON.parse(content);
-      console.log(`  Found existing ${settingsPath}`);
+      const content = fs.readFileSync(mcpJsonPath, "utf-8");
+      mcpConfig = JSON.parse(content);
+      console.log(`  Found existing ${mcpJsonPath}`);
     } catch {
-      console.log(`  Warning: Could not parse existing settings.json, creating fresh one`);
-      settings = {};
+      console.log(`  Warning: Could not parse existing .mcp.json, creating fresh one`);
+      mcpConfig = { mcpServers: {} };
     }
   } else {
     if (!fs.existsSync(claudeDir)) {
@@ -100,19 +100,19 @@ function initGlobal() {
     }
   }
 
-  if (!settings.mcpServers) {
-    settings.mcpServers = {};
+  if (!mcpConfig.mcpServers) {
+    mcpConfig.mcpServers = {};
   }
 
-  settings.mcpServers["agent-nexus"] = MCP_SERVER_CONFIG;
+  mcpConfig.mcpServers["agent-nexus"] = MCP_SERVER_CONFIG;
 
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-  console.log(`  Updated ${settingsPath}`);
+  fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n");
+  console.log(`  Updated ${mcpJsonPath}`);
 
   console.log(`
   AgentNexus is ready (global install)!
 
-  The MCP server has been added to your global Claude Code settings.
+  The MCP server has been added to ~/.claude/.mcp.json.
   It will be available in ALL your Claude Code sessions.
 
   Next steps:
@@ -123,7 +123,7 @@ function initGlobal() {
     3. Agents can now communicate!
 
   Data stored in: ${NEXUS_DIR}/nexus.db
-  Config written to: ${settingsPath}
+  Config written to: ${mcpJsonPath}
   `);
 }
 

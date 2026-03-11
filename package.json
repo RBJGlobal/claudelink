@@ -1,10 +1,10 @@
 {
   "name": "agent-nexus",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "The central hub where your AI agents connect. Multi-terminal Claude Code agent communication via MCP.",
   "main": "./dist/index.js",
   "bin": {
-    "agent-nexus": "./dist/cli.js"
+    "agent-nexus": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
@@ -30,7 +30,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jaysidd/agent-nexus.git"
+    "url": "git+https://github.com/jaysidd/agent-nexus.git"
   },
   "homepage": "https://github.com/jaysidd/agent-nexus",
   "bugs": {
