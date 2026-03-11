@@ -9,7 +9,7 @@ const NEXUS_DIR = path.join(os.homedir(), ".agent-nexus");
 const MCP_SERVER_CONFIG = {
   type: "stdio" as const,
   command: "npx",
-  args: ["-y", "agent-nexus"],
+  args: ["-y", "-p", "agent-nexus", "node", "-e", "require('agent-nexus')"],
 };
 
 function printBanner() {
@@ -82,7 +82,7 @@ function initGlobal() {
   // Use claude mcp add command for proper global registration
   const { execSync } = require("child_process");
   try {
-    execSync("claude mcp add --scope user agent-nexus -- npx -y agent-nexus", {
+    execSync("claude mcp add --scope user agent-nexus -- npx -y -p agent-nexus node -e require('agent-nexus')", {
       stdio: "inherit",
     });
     console.log(`
@@ -106,7 +106,7 @@ function initGlobal() {
 
   Run this command manually to add AgentNexus globally:
 
-    claude mcp add --scope user agent-nexus -- npx -y agent-nexus
+    claude mcp add --scope user agent-nexus -- npx -y -p agent-nexus node -e require('agent-nexus')
 
   Then restart your Claude Code sessions.
     `);
