@@ -36,23 +36,29 @@ The developer agent receives the reviewer's message and can act on it.
 
 ## Installation
 
-### Global (recommended — works in every project)
+### Step 1: Install the package
 ```bash
-claude mcp add --scope user agent-nexus -- npx -y agent-nexus
+npm install -g agent-nexus
+```
+
+### Step 2: Add to Claude Code (pick one)
+
+**Global (recommended — works in every project):**
+```bash
+claude mcp add --scope user agent-nexus -- agent-nexus-server
 ```
 This adds AgentNexus to `~/.claude.json` so it's available in every Claude Code session, in every project. One command, done forever.
 
-Or use the CLI:
-```bash
-npx agent-nexus init --global
-```
-
-### Per-Project (only this project)
+**Per-Project (only this project):**
 ```bash
 cd your-project
 npx agent-nexus init
 ```
 This adds AgentNexus to `.mcp.json` in your project directory only.
+
+### Step 3: Restart Claude Code
+
+Close and reopen Claude Code in your terminals. AgentNexus tools will be available automatically.
 
 ### Requirements
 - Node.js 18+
@@ -285,24 +291,15 @@ AgentNexus stores its database at `~/.agent-nexus/nexus.db`. This path is fixed 
   "mcpServers": {
     "agent-nexus": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "agent-nexus"]
+      "command": "agent-nexus-server"
     }
   }
 }
 ```
 
-### ~/.claude/settings.json (global)
-```json
-{
-  "mcpServers": {
-    "agent-nexus": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "agent-nexus"]
-    }
-  }
-}
+### ~/.claude.json (global via CLI)
+```bash
+claude mcp add --scope user agent-nexus -- agent-nexus-server
 ```
 
 ## FAQ
@@ -366,13 +363,11 @@ Delete the `"agent-nexus": { ... }` block, save, and restart Claude Code in that
 
 **Option 2: Disable globally**
 
-If you installed with `--global`, remove the entry from `~/.claude/settings.json`:
+If you installed globally, remove it via CLI:
 
 ```bash
-nano ~/.claude/settings.json
+claude mcp remove --scope user agent-nexus
 ```
-
-Delete the `"agent-nexus": { ... }` block from `mcpServers`, save, and restart Claude Code.
 
 **Option 3: Clear all data but keep it installed**
 
@@ -388,14 +383,14 @@ This deletes the database (all messages, agents, bulletin entries) but keeps the
 # 1. Remove from project config
 #    Edit .mcp.json and delete the agent-nexus entry
 
-# 2. Remove from global config (if installed globally)
-#    Edit ~/.claude/settings.json and delete the agent-nexus entry
+# 2. Remove from global config
+claude mcp remove --scope user agent-nexus
 
-# 3. Delete all AgentNexus data
+# 3. Uninstall the package
+npm uninstall -g agent-nexus
+
+# 4. Delete all AgentNexus data
 rm -rf ~/.agent-nexus
-
-# 4. Clear the npx cache (optional)
-npm cache clean --force
 ```
 
 After any of these, just restart your Claude Code sessions. No computer restart needed — just close and reopen the terminal, or start a new `claude` session.
@@ -409,8 +404,7 @@ Yes. In your `.mcp.json`, add `"disabled": true`:
   "mcpServers": {
     "agent-nexus": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "agent-nexus"],
+      "command": "agent-nexus-server",
       "disabled": true
     }
   }
