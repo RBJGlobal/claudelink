@@ -36,18 +36,23 @@ The developer agent receives the reviewer's message and can act on it.
 
 ## Installation
 
-### Per-Project (recommended)
+### Global (recommended — works in every project)
+```bash
+claude mcp add --scope user agent-nexus -- npx -y agent-nexus
+```
+This adds AgentNexus to `~/.claude.json` so it's available in every Claude Code session, in every project. One command, done forever.
+
+Or use the CLI:
+```bash
+npx agent-nexus init --global
+```
+
+### Per-Project (only this project)
 ```bash
 cd your-project
 npx agent-nexus init
 ```
-This adds AgentNexus to `.mcp.json` in your project directory.
-
-### Global (all projects)
-```bash
-npx agent-nexus init --global
-```
-This adds AgentNexus to `~/.claude/settings.json` so it's available everywhere.
+This adds AgentNexus to `.mcp.json` in your project directory only.
 
 ### Requirements
 - Node.js 18+

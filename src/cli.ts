@@ -73,47 +73,23 @@ function initProject() {
 }
 
 function initGlobal() {
-  const claudeDir = path.join(os.homedir(), ".claude");
-  const mcpJsonPath = path.join(claudeDir, ".mcp.json");
-
   // Create ~/.agent-nexus directory
   if (!fs.existsSync(NEXUS_DIR)) {
     fs.mkdirSync(NEXUS_DIR, { recursive: true });
     console.log(`  Created ${NEXUS_DIR}/`);
   }
 
-  // Read or create ~/.claude/.mcp.json
-  let mcpConfig: any = { mcpServers: {} };
-
-  if (fs.existsSync(mcpJsonPath)) {
-    try {
-      const content = fs.readFileSync(mcpJsonPath, "utf-8");
-      mcpConfig = JSON.parse(content);
-      console.log(`  Found existing ${mcpJsonPath}`);
-    } catch {
-      console.log(`  Warning: Could not parse existing .mcp.json, creating fresh one`);
-      mcpConfig = { mcpServers: {} };
-    }
-  } else {
-    if (!fs.existsSync(claudeDir)) {
-      fs.mkdirSync(claudeDir, { recursive: true });
-    }
-  }
-
-  if (!mcpConfig.mcpServers) {
-    mcpConfig.mcpServers = {};
-  }
-
-  mcpConfig.mcpServers["agent-nexus"] = MCP_SERVER_CONFIG;
-
-  fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n");
-  console.log(`  Updated ${mcpJsonPath}`);
-
-  console.log(`
+  // Use claude mcp add command for proper global registration
+  const { execSync } = require("child_process");
+  try {
+    execSync("claude mcp add --scope user agent-nexus -- npx -y agent-nexus", {
+      stdio: "inherit",
+    });
+    console.log(`
   AgentNexus is ready (global install)!
 
-  The MCP server has been added to ~/.claude/.mcp.json.
-  It will be available in ALL your Claude Code sessions.
+  The MCP server has been added to your user-level Claude Code config (~/.claude.json).
+  It will be available in ALL your Claude Code sessions, in every project.
 
   Next steps:
     1. Restart Claude Code in your terminals
@@ -123,8 +99,18 @@ function initGlobal() {
     3. Agents can now communicate!
 
   Data stored in: ${NEXUS_DIR}/nexus.db
-  Config written to: ${mcpJsonPath}
-  `);
+    `);
+  } catch {
+    console.log(`
+  Could not run "claude mcp add" automatically.
+
+  Run this command manually to add AgentNexus globally:
+
+    claude mcp add --scope user agent-nexus -- npx -y agent-nexus
+
+  Then restart your Claude Code sessions.
+    `);
+  }
 }
 
 function showHelp() {
