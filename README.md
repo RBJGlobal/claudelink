@@ -128,20 +128,29 @@ agent-nexus help            # Show help
 
 ## Autonomous Mode (Recommended)
 
-By default, you'd have to tell Claude "check my inbox" manually every time. That defeats the purpose. With a simple configuration, agents communicate **autonomously** — checking for messages and sending updates on their own without you asking.
+By default, you'd have to tell Claude "check my inbox" manually every time. That defeats the purpose. With autonomous mode, agents communicate **on their own** — checking for messages and sending updates without you asking.
 
-### How It Works
+### Automatic Setup
 
-Add the AgentNexus instructions to your **global** `~/.claude/CLAUDE.md` file. This teaches every Claude Code session to:
+**This is installed automatically** when you run `agent-nexus init` or `agent-nexus init --global`. The init command creates a `CLAUDE.md` file with the autonomous communication instructions in the appropriate directory:
+
+- `init --global` → writes to `~/.claude/CLAUDE.md` (all projects)
+- `init` → writes to `./CLAUDE.md` (current project only)
+
+If you already have a `CLAUDE.md`, the AgentNexus instructions are appended without overwriting your existing content. Running init multiple times is safe — it won't duplicate the instructions.
+
+### What It Teaches Claude
+
+The `CLAUDE.md` file instructs every Claude Code session to:
 
 - **Check inbox automatically** before and after every task
 - **Send updates proactively** to other agents when work is completed
 - **Respond to messages immediately** without waiting for you to say "check inbox"
 - **Post to the bulletin board** when making decisions that affect the project
 
-### Setup
+### Manual Fallback
 
-Create or add to `~/.claude/CLAUDE.md`:
+If the automatic setup doesn't work on your system (different directory structure, permissions, etc.), you can manually create or add to `~/.claude/CLAUDE.md`:
 
 ```markdown
 ## AgentNexus - Autonomous Agent Communication
