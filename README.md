@@ -211,6 +211,122 @@ AgentNexus stores its database at `~/.agent-nexus/nexus.db`. This path is fixed 
 }
 ```
 
+## FAQ
+
+### Wait, does `npx agent-nexus init` start Claude?
+
+**No.** You only run `npx agent-nexus init` **once**. It's a setup command that writes a config file (`.mcp.json`) telling Claude Code to connect to AgentNexus on startup. After that, you never need to run it again.
+
+Your daily workflow is exactly the same as before:
+
+```bash
+# Terminal 1 — start Claude normally
+claude
+
+# Terminal 2 — start Claude normally
+claude
+
+# Terminal 3 — start Claude with full auto-permissions
+claude --dangerously-skip-permissions
+```
+
+Claude Code reads `.mcp.json` when it starts, sees AgentNexus is configured, and automatically connects. The `register`, `send`, `read_inbox`, and other tools just appear — no extra commands.
+
+Then you just talk naturally:
+
+**Terminal 1:**
+> "Register as a code reviewer working on the auth module"
+
+**Terminal 2:**
+> "Register as a developer. Send a message to the reviewer asking if auth.ts looks good."
+
+### How do I start Claude with different permission modes?
+
+AgentNexus works with all Claude Code startup modes:
+
+```bash
+# Standard mode (Claude asks before using tools)
+claude
+
+# Skip all permission prompts
+claude --dangerously-skip-permissions
+
+# Auto-approve only AgentNexus tools (recommended)
+claude --allowedTools "mcp__agent-nexus__*"
+```
+
+### How do I disable AgentNexus?
+
+You do **not** need to restart your computer. There are several options depending on what you want:
+
+**Option 1: Disable for a specific project**
+
+Remove the `agent-nexus` entry from your project's `.mcp.json`:
+
+```bash
+# Open the config
+nano .mcp.json
+```
+
+Delete the `"agent-nexus": { ... }` block, save, and restart Claude Code in that terminal. AgentNexus tools will no longer appear for that project.
+
+**Option 2: Disable globally**
+
+If you installed with `--global`, remove the entry from `~/.claude/settings.json`:
+
+```bash
+nano ~/.claude/settings.json
+```
+
+Delete the `"agent-nexus": { ... }` block from `mcpServers`, save, and restart Claude Code.
+
+**Option 3: Clear all data but keep it installed**
+
+```bash
+npx agent-nexus reset
+```
+
+This deletes the database (all messages, agents, bulletin entries) but keeps the config so you can start fresh.
+
+**Option 4: Full uninstall (remove everything)**
+
+```bash
+# 1. Remove from project config
+#    Edit .mcp.json and delete the agent-nexus entry
+
+# 2. Remove from global config (if installed globally)
+#    Edit ~/.claude/settings.json and delete the agent-nexus entry
+
+# 3. Delete all AgentNexus data
+rm -rf ~/.agent-nexus
+
+# 4. Clear the npx cache (optional)
+npm cache clean --force
+```
+
+After any of these, just restart your Claude Code sessions. No computer restart needed — just close and reopen the terminal, or start a new `claude` session.
+
+### Can I temporarily disable it without deleting anything?
+
+Yes. In your `.mcp.json`, add `"disabled": true`:
+
+```json
+{
+  "mcpServers": {
+    "agent-nexus": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "agent-nexus"],
+      "disabled": true
+    }
+  }
+}
+```
+
+Set it back to `false` (or remove the line) to re-enable. Restart Claude Code after changing.
+
+---
+
 ## Contributing
 
 Contributions are welcome! This is an open-source project and we'd love the community to help build on it.
