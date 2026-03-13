@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "agent-nexus": {
+    "claudelink": {
       "type": "stdio",
-      "command": "agent-nexus-server"
+      "command": "claudelink-server"
     }
   }
 }

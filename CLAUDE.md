@@ -1,4 +1,4 @@
-# AgentNexus - Project Instructions
+# ClaudeLink - Project Instructions
 
 ## Autonomous Agent Communication (IMPORTANT)
 

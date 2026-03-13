@@ -4,17 +4,17 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-const NEXUS_DIR = path.join(os.homedir(), ".agent-nexus");
+const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 
 const MCP_SERVER_CONFIG = {
   type: "stdio" as const,
-  command: "agent-nexus-server",
+  command: "claudelink-server",
 };
 
 const CLAUDE_MD_CONTENT = `
-## AgentNexus - Autonomous Agent Communication
+## ClaudeLink - Autonomous Agent Communication
 
-You are part of a multi-agent team. Other agents may be running in separate terminals and can send you messages at any time via AgentNexus.
+You are part of a multi-agent team. Other agents may be running in separate terminals and can send you messages at any time via ClaudeLink.
 
 ### Automatic Inbox Checking
 
@@ -42,7 +42,7 @@ You are part of a multi-agent team. Other agents may be running in separate term
 - **"check the board"** — Use \`get_bulletin\` to read the bulletin board
 `.trim();
 
-const CLAUDE_MD_MARKER = "## AgentNexus - Autonomous Agent Communication";
+const CLAUDE_MD_MARKER = "## ClaudeLink - Autonomous Agent Communication";
 
 function installClaudeMd(scope: "global" | "project") {
   let claudeMdPath: string;
@@ -57,28 +57,28 @@ function installClaudeMd(scope: "global" | "project") {
     claudeMdPath = path.join(process.cwd(), "CLAUDE.md");
   }
 
-  // Check if CLAUDE.md exists and already has AgentNexus content
+  // Check if CLAUDE.md exists and already has ClaudeLink content
   if (fs.existsSync(claudeMdPath)) {
     const existing = fs.readFileSync(claudeMdPath, "utf-8");
     if (existing.includes(CLAUDE_MD_MARKER)) {
-      console.log(`  CLAUDE.md already has AgentNexus instructions (${claudeMdPath})`);
+      console.log(`  CLAUDE.md already has ClaudeLink instructions (${claudeMdPath})`);
       return;
     }
     // Append to existing file
     const separator = existing.endsWith("\n") ? "\n" : "\n\n";
     fs.writeFileSync(claudeMdPath, existing + separator + CLAUDE_MD_CONTENT + "\n");
-    console.log(`  Added AgentNexus instructions to existing ${claudeMdPath}`);
+    console.log(`  Added ClaudeLink instructions to existing ${claudeMdPath}`);
   } else {
     // Create new file
     fs.writeFileSync(claudeMdPath, "# Global Instructions\n\n" + CLAUDE_MD_CONTENT + "\n");
-    console.log(`  Created ${claudeMdPath} with AgentNexus instructions`);
+    console.log(`  Created ${claudeMdPath} with ClaudeLink instructions`);
   }
 }
 
 function printBanner() {
   console.log(`
     ╔═══════════════════════════════════════════╗
-    ║            A G E N T  N E X U S           ║
+    ║            C L A U D E  L I N K           ║
     ║   The hub where your AI agents connect.   ║
     ╚═══════════════════════════════════════════╝
   `);
@@ -88,7 +88,7 @@ function initProject() {
   const cwd = process.cwd();
   const mcpJsonPath = path.join(cwd, ".mcp.json");
 
-  // Create ~/.agent-nexus directory
+  // Create ~/.claudelink directory
   if (!fs.existsSync(NEXUS_DIR)) {
     fs.mkdirSync(NEXUS_DIR, { recursive: true });
     console.log(`  Created ${NEXUS_DIR}/`);
@@ -111,8 +111,8 @@ function initProject() {
     }
   }
 
-  // Add agent-nexus server config
-  mcpConfig.mcpServers["agent-nexus"] = MCP_SERVER_CONFIG;
+  // Add claudelink server config
+  mcpConfig.mcpServers["claudelink"] = MCP_SERVER_CONFIG;
 
   fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n");
   console.log(`  Updated ${mcpJsonPath}`);
@@ -121,10 +121,10 @@ function initProject() {
   installClaudeMd("project");
 
   console.log(`
-  AgentNexus is ready!
+  ClaudeLink is ready!
 
   What was set up:
-    - .mcp.json: MCP server config (tells Claude Code to connect to AgentNexus)
+    - .mcp.json: MCP server config (tells Claude Code to connect to ClaudeLink)
     - CLAUDE.md: Autonomous mode instructions (agents check inbox automatically)
 
   Next steps:
@@ -143,7 +143,7 @@ function initProject() {
 }
 
 function initGlobal() {
-  // Create ~/.agent-nexus directory
+  // Create ~/.claudelink directory
   if (!fs.existsSync(NEXUS_DIR)) {
     fs.mkdirSync(NEXUS_DIR, { recursive: true });
     console.log(`  Created ${NEXUS_DIR}/`);
@@ -153,7 +153,7 @@ function initGlobal() {
   const { execSync } = require("child_process");
   let mcpSuccess = false;
   try {
-    execSync("claude mcp add --scope user agent-nexus -- agent-nexus-server", {
+    execSync("claude mcp add --scope user claudelink -- claudelink-server", {
       stdio: "inherit",
     });
     mcpSuccess = true;
@@ -161,9 +161,9 @@ function initGlobal() {
     console.log(`
   Could not run "claude mcp add" automatically.
 
-  Run this command manually to add AgentNexus globally:
+  Run this command manually to add ClaudeLink globally:
 
-    claude mcp add --scope user agent-nexus -- agent-nexus-server
+    claude mcp add --scope user claudelink -- claudelink-server
     `);
   }
 
@@ -172,7 +172,7 @@ function initGlobal() {
 
   if (mcpSuccess) {
     console.log(`
-  AgentNexus is ready (global install)!
+  ClaudeLink is ready (global install)!
 
   What was set up:
     - ~/.claude.json: MCP server config (available in ALL projects)
@@ -192,11 +192,11 @@ function initGlobal() {
 
 function showHelp() {
   console.log(`
-  Usage: agent-nexus <command>
+  Usage: claudelink <command>
 
   Commands:
-    init          Add AgentNexus to .mcp.json in current project + CLAUDE.md
-    init --global Add AgentNexus globally + ~/.claude/CLAUDE.md
+    init          Add ClaudeLink to .mcp.json in current project + CLAUDE.md
+    init --global Add ClaudeLink globally + ~/.claude/CLAUDE.md
     status        Show registered agents and their status
     reset         Clear all messages and agent registrations
     help          Show this help message
@@ -206,7 +206,7 @@ function showHelp() {
 function showStatus() {
   const dbPath = path.join(NEXUS_DIR, "nexus.db");
   if (!fs.existsSync(dbPath)) {
-    console.log("  No AgentNexus database found. Run 'agent-nexus init' first.");
+    console.log("  No ClaudeLink database found. Run 'claudelink init' first.");
     return;
   }
 
@@ -219,7 +219,7 @@ function showStatus() {
     const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages WHERE read = 0").get() as any;
     const bulletinCount = db.prepare("SELECT COUNT(*) as count FROM bulletin").get() as any;
 
-    console.log(`\n  AgentNexus Status`);
+    console.log(`\n  ClaudeLink Status`);
     console.log(`  ─────────────────`);
     console.log(`  Database: ${dbPath}`);
     console.log(`  Unread messages: ${msgCount.count}`);
@@ -254,7 +254,7 @@ function resetDB() {
     // Clean up WAL files if present
     if (fs.existsSync(dbPath + "-wal")) fs.unlinkSync(dbPath + "-wal");
     if (fs.existsSync(dbPath + "-shm")) fs.unlinkSync(dbPath + "-shm");
-    console.log("  AgentNexus database cleared. All messages and registrations removed.");
+    console.log("  ClaudeLink database cleared. All messages and registrations removed.");
   } else {
     console.log("  No database found. Nothing to reset.");
   }

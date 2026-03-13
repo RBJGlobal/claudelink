@@ -1,12 +1,12 @@
-# AgentNexus
+# ClaudeLink
 
-**The central hub where your AI agents connect.**
+**The hub where your AI agents connect.**
 
-AgentNexus lets multiple Claude Code instances running in separate terminals communicate with each other in real time. Open four terminals, give each agent a role, and watch them collaborate — sending messages, sharing findings, and coordinating work through a shared bulletin board.
+ClaudeLink lets multiple Claude Code instances running in separate terminals communicate with each other in real time. Open four terminals, give each agent a role, and watch them collaborate — sending messages, sharing findings, and coordinating work through a shared bulletin board.
 
 ```
 Terminal 1 (reviewer)  ──┐
-Terminal 2 (developer) ──┤── AgentNexus ── SQLite
+Terminal 2 (developer) ──┤── ClaudeLink ── SQLite
 Terminal 3 (tester)    ──┤
 Terminal 4 (ops)       ──┘
 ```
@@ -15,7 +15,7 @@ Terminal 4 (ops)       ──┘
 
 ```bash
 # Install and configure (one command)
-npx agent-nexus init
+npx claudelink init
 ```
 
 Restart your Claude Code terminals. That's it.
@@ -38,27 +38,27 @@ The developer agent receives the reviewer's message and can act on it.
 
 ### Step 1: Install the package
 ```bash
-npm install -g agent-nexus
+npm install -g claudelink
 ```
 
 ### Step 2: Add to Claude Code (pick one)
 
 **Global (recommended — works in every project):**
 ```bash
-claude mcp add --scope user agent-nexus -- agent-nexus-server
+claude mcp add --scope user claudelink -- claudelink-server
 ```
-This adds AgentNexus to `~/.claude.json` so it's available in every Claude Code session, in every project. One command, done forever.
+This adds ClaudeLink to `~/.claude.json` so it's available in every Claude Code session, in every project. One command, done forever.
 
 **Per-Project (only this project):**
 ```bash
 cd your-project
-npx agent-nexus init
+npx claudelink init
 ```
-This adds AgentNexus to `.mcp.json` in your project directory only.
+This adds ClaudeLink to `.mcp.json` in your project directory only.
 
 ### Step 3: Restart Claude Code
 
-Close and reopen Claude Code in your terminals. AgentNexus tools will be available automatically.
+Close and reopen Claude Code in your terminals. ClaudeLink tools will be available automatically.
 
 ### Requirements
 - Node.js 18+
@@ -66,7 +66,7 @@ Close and reopen Claude Code in your terminals. AgentNexus tools will be availab
 
 ## How It Works
 
-AgentNexus is an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server. Each Claude Code instance connects to it automatically and gets access to communication tools. All instances share a single SQLite database (`~/.agent-nexus/nexus.db`) using WAL mode for safe concurrent access.
+ClaudeLink is an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server. Each Claude Code instance connects to it automatically and gets access to communication tools. All instances share a single SQLite database (`~/.claudelink/nexus.db`) using WAL mode for safe concurrent access.
 
 There is no daemon or background service. Each Claude Code session spawns its own MCP server process, and they coordinate through the shared database.
 
@@ -119,11 +119,11 @@ Read the bulletin board.
 ## CLI Commands
 
 ```bash
-agent-nexus init            # Configure for current project
-agent-nexus init --global   # Configure globally
-agent-nexus status          # Show registered agents and message stats
-agent-nexus reset           # Clear all data (fresh start)
-agent-nexus help            # Show help
+claudelink init            # Configure for current project
+claudelink init --global   # Configure globally
+claudelink status          # Show registered agents and message stats
+claudelink reset           # Clear all data (fresh start)
+claudelink help            # Show help
 ```
 
 ## Autonomous Mode (Recommended)
@@ -132,12 +132,12 @@ By default, you'd have to tell Claude "check my inbox" manually every time. That
 
 ### Automatic Setup
 
-**This is installed automatically** when you run `agent-nexus init` or `agent-nexus init --global`. The init command creates a `CLAUDE.md` file with the autonomous communication instructions in the appropriate directory:
+**This is installed automatically** when you run `claudelink init` or `claudelink init --global`. The init command creates a `CLAUDE.md` file with the autonomous communication instructions in the appropriate directory:
 
 - `init --global` → writes to `~/.claude/CLAUDE.md` (all projects)
 - `init` → writes to `./CLAUDE.md` (current project only)
 
-If you already have a `CLAUDE.md`, the AgentNexus instructions are appended without overwriting your existing content. Running init multiple times is safe — it won't duplicate the instructions.
+If you already have a `CLAUDE.md`, the ClaudeLink instructions are appended without overwriting your existing content. Running init multiple times is safe — it won't duplicate the instructions.
 
 ### What It Teaches Claude
 
@@ -153,10 +153,10 @@ The `CLAUDE.md` file instructs every Claude Code session to:
 If the automatic setup doesn't work on your system (different directory structure, permissions, etc.), you can manually create or add to `~/.claude/CLAUDE.md`:
 
 ```markdown
-## AgentNexus - Autonomous Agent Communication
+## ClaudeLink - Autonomous Agent Communication
 
 You are part of a multi-agent team. Other agents may be running in separate
-terminals and can send you messages at any time via AgentNexus.
+terminals and can send you messages at any time via ClaudeLink.
 
 ### Automatic Inbox Checking
 
@@ -264,8 +264,8 @@ One instruction from you. All the communication happens automatically.
                             │
                    ┌────────▼────────┐
                    │   SQLite (WAL)   │
-                   │ ~/.agent-nexus/  │
-                   │   nexus.db       │
+                   │  ~/.claudelink/  │
+                   │    nexus.db      │
                    └─────────────────┘
 ```
 
@@ -292,15 +292,15 @@ Each Claude Code session spawns its own MCP server process via stdio. All proces
 
 ## Configuration
 
-AgentNexus stores its database at `~/.agent-nexus/nexus.db`. This path is fixed so all Claude Code instances across all projects converge on the same communication hub.
+ClaudeLink stores its database at `~/.claudelink/nexus.db`. This path is fixed so all Claude Code instances across all projects converge on the same communication hub.
 
 ### .mcp.json (per-project)
 ```json
 {
   "mcpServers": {
-    "agent-nexus": {
+    "claudelink": {
       "type": "stdio",
-      "command": "agent-nexus-server"
+      "command": "claudelink-server"
     }
   }
 }
@@ -308,14 +308,14 @@ AgentNexus stores its database at `~/.agent-nexus/nexus.db`. This path is fixed 
 
 ### ~/.claude.json (global via CLI)
 ```bash
-claude mcp add --scope user agent-nexus -- agent-nexus-server
+claude mcp add --scope user claudelink -- claudelink-server
 ```
 
 ## FAQ
 
-### Wait, does `npx agent-nexus init` start Claude?
+### Wait, does `npx claudelink init` start Claude?
 
-**No.** You only run `npx agent-nexus init` **once**. It's a setup command that writes a config file (`.mcp.json`) telling Claude Code to connect to AgentNexus on startup. After that, you never need to run it again.
+**No.** You only run `npx claudelink init` **once**. It's a setup command that writes a config file (`.mcp.json`) telling Claude Code to connect to ClaudeLink on startup. After that, you never need to run it again.
 
 Your daily workflow is exactly the same as before:
 
@@ -330,7 +330,7 @@ claude
 claude --dangerously-skip-permissions
 ```
 
-Claude Code reads `.mcp.json` when it starts, sees AgentNexus is configured, and automatically connects. The `register`, `send`, `read_inbox`, and other tools just appear — no extra commands.
+Claude Code reads `.mcp.json` when it starts, sees ClaudeLink is configured, and automatically connects. The `register`, `send`, `read_inbox`, and other tools just appear — no extra commands.
 
 Then you just talk naturally:
 
@@ -342,7 +342,7 @@ Then you just talk naturally:
 
 ### How do I start Claude with different permission modes?
 
-AgentNexus works with all Claude Code startup modes:
+ClaudeLink works with all Claude Code startup modes:
 
 ```bash
 # Standard mode (Claude asks before using tools)
@@ -351,37 +351,37 @@ claude
 # Skip all permission prompts
 claude --dangerously-skip-permissions
 
-# Auto-approve only AgentNexus tools (recommended)
-claude --allowedTools "mcp__agent-nexus__*"
+# Auto-approve only ClaudeLink tools (recommended)
+claude --allowedTools "mcp__claudelink__*"
 ```
 
-### How do I disable AgentNexus?
+### How do I disable ClaudeLink?
 
 You do **not** need to restart your computer. There are several options depending on what you want:
 
 **Option 1: Disable for a specific project**
 
-Remove the `agent-nexus` entry from your project's `.mcp.json`:
+Remove the `claudelink` entry from your project's `.mcp.json`:
 
 ```bash
 # Open the config
 nano .mcp.json
 ```
 
-Delete the `"agent-nexus": { ... }` block, save, and restart Claude Code in that terminal. AgentNexus tools will no longer appear for that project.
+Delete the `"claudelink": { ... }` block, save, and restart Claude Code in that terminal. ClaudeLink tools will no longer appear for that project.
 
 **Option 2: Disable globally**
 
 If you installed globally, remove it via CLI:
 
 ```bash
-claude mcp remove --scope user agent-nexus
+claude mcp remove --scope user claudelink
 ```
 
 **Option 3: Clear all data but keep it installed**
 
 ```bash
-npx agent-nexus reset
+npx claudelink reset
 ```
 
 This deletes the database (all messages, agents, bulletin entries) but keeps the config so you can start fresh.
@@ -390,16 +390,16 @@ This deletes the database (all messages, agents, bulletin entries) but keeps the
 
 ```bash
 # 1. Remove from project config
-#    Edit .mcp.json and delete the agent-nexus entry
+#    Edit .mcp.json and delete the claudelink entry
 
 # 2. Remove from global config
-claude mcp remove --scope user agent-nexus
+claude mcp remove --scope user claudelink
 
 # 3. Uninstall the package
-npm uninstall -g agent-nexus
+npm uninstall -g claudelink
 
-# 4. Delete all AgentNexus data
-rm -rf ~/.agent-nexus
+# 4. Delete all ClaudeLink data
+rm -rf ~/.claudelink
 ```
 
 After any of these, just restart your Claude Code sessions. No computer restart needed — just close and reopen the terminal, or start a new `claude` session.
@@ -411,9 +411,9 @@ Yes. In your `.mcp.json`, add `"disabled": true`:
 ```json
 {
   "mcpServers": {
-    "agent-nexus": {
+    "claudelink": {
       "type": "stdio",
-      "command": "agent-nexus-server",
+      "command": "claudelink-server",
       "disabled": true
     }
   }
@@ -430,8 +430,8 @@ Contributions are welcome! This is an open-source project and we'd love the comm
 
 ### Development Setup
 ```bash
-git clone https://github.com/jaysidd/agent-nexus.git
-cd agent-nexus
+git clone https://github.com/jaysidd/claudelink.git
+cd claudelink
 npm install
 npm run build
 ```
@@ -465,10 +465,10 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 Built by [Jay Siddiqi](https://github.com/jaysidd).
 
-If AgentNexus helps your workflow, give it a star and share it with your team.
+If ClaudeLink helps your workflow, give it a star and share it with your team.
 
 ---
 
 ### Keywords
 
-agent nexus, multi-agent communication, claude code, claude code mcp, mcp server, model context protocol, ai agent collaboration, multi-terminal ai, agent-to-agent messaging, inter-process communication, ipc ai agents, claude code plugin, claude code extension, ai pair programming, ai code review, multi-agent workflow, ai terminal tools, developer tools, ai developer tools, open source ai tools, agent orchestration, agent mesh, ai agent hub, collaborative ai agents, claude mcp server, sqlite mcp, ai swarm, multi-agent system, ai team simulation, agent message bus, claude code multi-instance, iterm2 ai, terminal ai agents, ai agent framework, autonomous ai agents, agent communication protocol, ai productivity tools, claude code tools, mcp tools, ai workflow automation
+claudelink, claude link, multi-agent communication, claude code, claude code mcp, mcp server, model context protocol, ai agent collaboration, multi-terminal ai, agent-to-agent messaging, inter-process communication, ipc ai agents, claude code plugin, claude code extension, ai pair programming, ai code review, multi-agent workflow, ai terminal tools, developer tools, ai developer tools, open source ai tools, agent orchestration, agent mesh, ai agent hub, collaborative ai agents, claude mcp server, sqlite mcp, ai swarm, multi-agent system, ai team simulation, agent message bus, claude code multi-instance, iterm2 ai, terminal ai agents, ai agent framework, autonomous ai agents, agent communication protocol, ai productivity tools, claude code tools, mcp tools, ai workflow automation

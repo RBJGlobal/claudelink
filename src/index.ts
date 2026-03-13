@@ -12,7 +12,7 @@ let currentAgentId: string | null = null;
 let currentRole: string | null = null;
 
 const server = new Server(
-  { name: "AgentNexus", version: "1.0.0" },
+  { name: "ClaudeLink", version: "1.0.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -299,11 +299,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("AgentNexus MCP server started (pid: " + process.pid + ")");
+  console.error("ClaudeLink MCP server started (pid: " + process.pid + ")");
 }
 
 main().catch((err) => {
-  console.error("Failed to start AgentNexus:", err);
+  console.error("Failed to start ClaudeLink:", err);
   process.exit(1);
 });
 

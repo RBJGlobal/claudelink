@@ -32,7 +32,7 @@ export interface BulletinEntry {
   created_at: string;
 }
 
-const NEXUS_DIR = path.join(os.homedir(), ".agent-nexus");
+const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
 
 function isProcessAlive(pid: number): boolean {

@@ -1,11 +1,11 @@
 {
-  "name": "agent-nexus",
-  "version": "1.0.9",
-  "description": "The central hub where your AI agents connect. Multi-terminal Claude Code agent communication via MCP.",
+  "name": "claudelink",
+  "version": "1.0.0",
+  "description": "The hub where your AI agents connect. Multi-terminal Claude Code agent communication via MCP.",
   "main": "./dist/index.js",
   "bin": {
-    "agent-nexus": "./bin/cli.js",
-    "agent-nexus-server": "./bin/server.js"
+    "claudelink": "./bin/cli.js",
+    "claudelink-server": "./bin/server.js"
   },
   "scripts": {
     "build": "tsc",
@@ -19,6 +19,7 @@
   "keywords": [
     "claude",
     "claude-code",
+    "claudelink",
     "mcp",
     "ai-agents",
     "multi-agent",
@@ -32,11 +33,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jaysidd/agent-nexus.git"
+    "url": "git+https://github.com/jaysidd/claudelink.git"
   },
-  "homepage": "https://github.com/jaysidd/agent-nexus",
+  "homepage": "https://github.com/jaysidd/claudelink",
   "bugs": {
-    "url": "https://github.com/jaysidd/agent-nexus/issues"
+    "url": "https://github.com/jaysidd/claudelink/issues"
   },
   "engines": {
     "node": ">=18.0.0"
