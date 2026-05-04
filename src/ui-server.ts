@@ -295,6 +295,9 @@ const HTML = String.raw`<!doctype html>
   .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel); border: 1px solid var(--border); padding: 12px 18px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); animation: slideIn 0.2s; max-width: 360px; }
   .toast.success { border-left: 3px solid var(--green); }
   .toast.error   { border-left: 3px solid var(--red); }
+  .disconnected-banner { display: none; background: rgba(255,180,84,0.08); border-bottom: 1px solid rgba(255,180,84,0.3); color: var(--amber); padding: 10px 20px; font-size: 12px; }
+  .disconnected-banner.show { display: block; }
+  .disconnected-banner button { background: transparent; color: var(--amber); border: 1px solid rgba(255,180,84,0.4); padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: 8px; }
   @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   .msg-row { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .msg-row:last-child { border-bottom: none; }
@@ -313,6 +316,11 @@ const HTML = String.raw`<!doctype html>
   <button id="btn-kill-all" class="danger">Kill all servers</button>
   <button id="btn-quit" class="danger">Quit UI</button>
 </header>
+<div id="disconnected-banner" class="disconnected-banner">
+  Disconnected from ClaudeLink. The server isn't running.
+  Start Claude Code in any terminal and it will reconnect automatically.
+  <button id="btn-retry-now">Retry now</button>
+</div>
 
 <main>
   <section class="panel">
@@ -356,12 +364,25 @@ const HTML = String.raw`<!doctype html>
 
 <script>
 const $ = (id) => document.getElementById(id);
+const POLL_FAST = 2000;
+const POLL_SLOW = 10000;
 let pollHandle = null;
+let pollMs = POLL_FAST;
+let consecutiveFailures = 0;
 
 async function api(path, method = "GET", body = null) {
   const init = { method, headers: { "Content-Type": "application/json" } };
   if (body) init.body = JSON.stringify(body);
-  const r = await fetch(path, init);
+  let r;
+  try {
+    r = await fetch(path, init);
+  } catch (e) {
+    // Network error (server down) — translate to a typed error so callers
+    // can distinguish disconnect from real HTTP failures.
+    const err = new Error("disconnected");
+    err.disconnected = true;
+    throw err;
+  }
   if (!r.ok) throw new Error("HTTP " + r.status + ": " + (await r.text()));
   return r.json();
 }
@@ -477,14 +498,31 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
 
+function setPollInterval(ms) {
+  if (pollMs === ms) return;
+  pollMs = ms;
+  if (pollHandle) clearInterval(pollHandle);
+  pollHandle = setInterval(refresh, ms);
+}
+
 async function refresh() {
   try {
     const state = await api("/api/state");
     render(state);
     $("status-dot").style.background = "var(--green)";
+    $("disconnected-banner").classList.remove("show");
+    if (consecutiveFailures > 0) {
+      consecutiveFailures = 0;
+      setPollInterval(POLL_FAST);
+    }
   } catch (e) {
+    consecutiveFailures++;
     $("status-dot").style.background = "var(--red)";
     $("last-update").textContent = "disconnected";
+    if (e && e.disconnected && consecutiveFailures >= 2) {
+      $("disconnected-banner").classList.add("show");
+      setPollInterval(POLL_SLOW);
+    }
   }
 }
 
@@ -533,8 +571,15 @@ $("btn-quit").addEventListener("click", async () => {
   document.body.innerHTML = '<div style="padding:40px;text-align:center;color:#8a93a6;">UI stopped. You can close this tab.</div>';
 });
 
+$("btn-retry-now")?.addEventListener("click", refresh);
+
+window.addEventListener("unhandledrejection", (e) => {
+  // Suppress noisy console output for network errors from our own polling.
+  if (e.reason && e.reason.disconnected) e.preventDefault();
+});
+
 refresh();
-pollHandle = setInterval(refresh, 2000);
+pollHandle = setInterval(refresh, pollMs);
 </script>
 </body>
 </html>`;
