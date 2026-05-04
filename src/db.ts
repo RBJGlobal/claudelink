@@ -225,12 +225,28 @@ export class NexusDB {
       .filter((a) => !isProcessAlive(a.pid))
       .map((a) => a.id);
 
-    if (deadIds.length > 0) {
-      const placeholders = deadIds.map(() => "?").join(",");
-      this.db
-        .prepare(`DELETE FROM agents WHERE id IN (${placeholders})`)
-        .run(...deadIds);
-    }
+    if (deadIds.length === 0) return;
+
+    // messages.from_agent and bulletin.from_agent FK -> agents(id) without
+    // ON DELETE CASCADE. better-sqlite3 v12 enables foreign_keys by default,
+    // so we must clear dependent rows before the agent rows, atomically.
+    const placeholders = deadIds.map(() => "?").join(",");
+    const deleteMessages = this.db.prepare(
+      `DELETE FROM messages WHERE from_agent IN (${placeholders})`
+    );
+    const deleteBulletin = this.db.prepare(
+      `DELETE FROM bulletin WHERE from_agent IN (${placeholders})`
+    );
+    const deleteAgents = this.db.prepare(
+      `DELETE FROM agents WHERE id IN (${placeholders})`
+    );
+
+    const prune = this.db.transaction(() => {
+      deleteMessages.run(...deadIds);
+      deleteBulletin.run(...deadIds);
+      deleteAgents.run(...deadIds);
+    });
+    prune();
   }
 
   close(): void {
