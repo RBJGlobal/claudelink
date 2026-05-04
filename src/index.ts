@@ -6,6 +6,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { NexusDB } from "./db.js";
+import { launchUIIfNeeded } from "./ui-launcher.js";
 
 const db = new NexusDB();
 let currentAgentId: string | null = null;
@@ -300,6 +301,14 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("ClaudeLink MCP server started (pid: " + process.pid + ")");
+
+  // Launch the Command Center UI (singleton — first server wins, others no-op).
+  // Failures here must never break the MCP server, so wrap in a defensive try.
+  launchUIIfNeeded({ openBrowser: true })
+    .then((url) => {
+      if (url) console.error("ClaudeLink Command Center: " + url);
+    })
+    .catch(() => {});
 }
 
 main().catch((err) => {

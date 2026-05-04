@@ -198,9 +198,36 @@ function showHelp() {
     init          Add ClaudeLink to .mcp.json in current project + CLAUDE.md
     init --global Add ClaudeLink globally + ~/.claude/CLAUDE.md
     status        Show registered agents and their status
+    ui            Launch the Command Center UI in your browser
+    ui --stop     Stop the Command Center UI
     reset         Clear all messages and agent registrations
     help          Show this help message
   `);
+}
+
+async function uiCommand(stop: boolean) {
+  const { launchUIIfNeeded, stopUI, getUIStatus } = await import("./ui-launcher.js");
+  if (stop) {
+    const ok = stopUI();
+    console.log(ok ? "  Command Center UI stopped." : "  Command Center UI is not running.");
+    return;
+  }
+  const status = getUIStatus();
+  if (status.running) {
+    console.log(`  Command Center UI is already running.`);
+    console.log(`  Open: ${status.url}`);
+    return;
+  }
+  const url = await launchUIIfNeeded({ openBrowser: true });
+  if (url) {
+    console.log(`  Command Center UI launched.`);
+    console.log(`  Open: ${url}`);
+  } else {
+    console.log(`  Could not launch the Command Center UI.`);
+    if (process.env.CLAUDELINK_UI === "off") {
+      console.log(`  CLAUDELINK_UI=off is set. Unset it to enable.`);
+    }
+  }
 }
 
 function showStatus() {
@@ -276,6 +303,9 @@ switch (command) {
     break;
   case "status":
     showStatus();
+    break;
+  case "ui":
+    uiCommand(args.includes("--stop") || args.includes("stop"));
     break;
   case "reset":
     resetDB();
