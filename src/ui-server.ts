@@ -4,6 +4,11 @@ import os from "os";
 import fs from "fs";
 import { execFileSync } from "child_process";
 import Database from "better-sqlite3";
+import { startScheduler, SchedulerHandle } from "./scheduler.js";
+import {
+  readSchedulerSettings,
+  writeSchedulerSettings,
+} from "./scheduler-settings.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -299,6 +304,15 @@ const HTML = String.raw`<!doctype html>
   .disconnected-banner.show { display: block; }
   .disconnected-banner button { background: transparent; color: var(--amber); border: 1px solid rgba(255,180,84,0.4); padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: 8px; }
   @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  .nudge-controls { padding: 14px 16px; display: flex; gap: 24px; align-items: center; flex-wrap: wrap; }
+  .nudge-toggle { display: flex; gap: 8px; align-items: center; cursor: pointer; user-select: none; }
+  .nudge-toggle input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+  .nudge-interval { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+  .nudge-interval input[type="number"] { width: 56px; background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 4px 6px; border-radius: 4px; font-size: 13px; font-family: inherit; }
+  .nudge-status { color: var(--green); font-size: 11px; min-width: 50px; opacity: 0; transition: opacity 0.2s; }
+  .nudge-status.show { opacity: 1; }
+  .nudge-hint { color: var(--muted); font-size: 12px; padding: 0 16px 14px; line-height: 1.5; margin: 0; }
+  .nudge-hint .mono { color: var(--text); }
   .msg-row { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .msg-row:last-child { border-bottom: none; }
   .msg-row .meta { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
@@ -351,6 +365,27 @@ const HTML = String.raw`<!doctype html>
         <button id="btn-heal" class="primary">Heal orphans</button>
         <span id="heal-hint" style="color: var(--muted); font-size: 12px; align-self: center;"></span>
       </div>
+    </div>
+  </section>
+
+  <section class="panel full">
+    <h2>Auto-nudge</h2>
+    <div class="body">
+      <div class="nudge-controls">
+        <label class="nudge-toggle">
+          <input type="checkbox" id="nudge-enabled" />
+          <span id="nudge-enabled-label">Off</span>
+        </label>
+        <label class="nudge-interval">
+          Interval:
+          <input type="number" id="nudge-interval" min="1" max="120" step="1" />
+          <span>min</span>
+        </label>
+        <span id="nudge-status" class="nudge-status"></span>
+      </div>
+      <p class="nudge-hint">
+        When on, types <span class="mono">"check for updates"</span> into each registered agent's terminal every N minutes — but only when their inbox actually has unread messages. The agent's existing UserPromptSubmit hook then handles the inbox read.
+      </p>
     </div>
   </section>
 
@@ -580,11 +615,42 @@ window.addEventListener("unhandledrejection", (e) => {
 
 refresh();
 pollHandle = setInterval(refresh, pollMs);
+
+// --- Auto-nudge controls ---
+async function loadNudge() {
+  try {
+    const s = await api("/api/scheduler", "GET");
+    $("nudge-enabled").checked = !!s.enabled;
+    $("nudge-enabled-label").textContent = s.enabled ? "On" : "Off";
+    $("nudge-interval").value = s.intervalMin;
+  } catch (e) {
+    if (!e.disconnected) toast("Failed to load nudge settings: " + e.message, "error");
+  }
+}
+async function saveNudge() {
+  const enabled = $("nudge-enabled").checked;
+  const intervalMin = Math.max(1, Math.min(120, parseInt($("nudge-interval").value, 10) || 5));
+  $("nudge-interval").value = intervalMin;
+  try {
+    const s = await api("/api/scheduler", "POST", { enabled, intervalMin });
+    $("nudge-enabled-label").textContent = s.enabled ? "On" : "Off";
+    const status = $("nudge-status");
+    status.textContent = "saved";
+    status.classList.add("show");
+    setTimeout(() => status.classList.remove("show"), 1500);
+  } catch (e) {
+    toast("Failed to save: " + e.message, "error");
+  }
+}
+$("nudge-enabled").addEventListener("change", saveNudge);
+$("nudge-interval").addEventListener("change", saveNudge);
+loadNudge();
 </script>
 </body>
 </html>`;
 
 export function startUIServer(port = 7878): http.Server {
+  let schedulerHandle: SchedulerHandle | null = null;
   const server = http.createServer((req, res) => {
     const send = (status: number, body: any, contentType = "application/json") => {
       res.statusCode = status;
@@ -629,6 +695,25 @@ export function startUIServer(port = 7878): http.Server {
         }, 50);
         return;
       }
+      if (req.method === "GET" && p === "/api/scheduler") {
+        return send(200, readSchedulerSettings());
+      }
+      if (req.method === "POST" && p === "/api/scheduler") {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            const next = writeSchedulerSettings(parsed);
+            if (schedulerHandle) schedulerHandle.reschedule();
+            send(200, next);
+          } catch (e: any) {
+            send(400, { error: e.message });
+          }
+        });
+        req.on("error", (e: any) => send(400, { error: e.message }));
+        return;
+      }
       send(404, { error: "not found" });
     } catch (e: any) {
       send(500, { error: e.message });
@@ -638,6 +723,7 @@ export function startUIServer(port = 7878): http.Server {
   server.listen(port, "127.0.0.1");
 
   const stopNotifier = startMessageNotifier();
+  schedulerHandle = startScheduler();
 
   const writeLock = () => {
     try {
@@ -656,9 +742,14 @@ export function startUIServer(port = 7878): http.Server {
       if (lock.pid === process.pid) fs.unlinkSync(LOCK_PATH);
     } catch {}
   };
-  process.on("SIGTERM", () => { stopNotifier(); cleanup(); process.exit(0); });
-  process.on("SIGINT", () => { stopNotifier(); cleanup(); process.exit(0); });
-  process.on("exit", () => { stopNotifier(); cleanup(); });
+  const stopAll = () => {
+    stopNotifier();
+    if (schedulerHandle) schedulerHandle.stop();
+    cleanup();
+  };
+  process.on("SIGTERM", () => { stopAll(); process.exit(0); });
+  process.on("SIGINT", () => { stopAll(); process.exit(0); });
+  process.on("exit", () => { stopAll(); });
 
   return server;
 }
