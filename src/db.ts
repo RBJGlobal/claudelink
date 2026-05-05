@@ -12,6 +12,23 @@ export interface Agent {
   last_seen: string;
   pid: number;
   alive: boolean;
+  tty: string | null;
+  terminal_app: string | null;
+  pane_id: string | null;
+  last_seen_active_ts: number | null;
+  autonomous_reply: number;
+}
+
+export interface RegisterOptions {
+  tty: string | null;
+  terminalApp: string | null;
+  paneId: string | null;
+  autonomousReply: boolean;
+}
+
+export interface SendOptions {
+  expectsReply?: boolean;
+  parentMessageId?: number | null;
 }
 
 export interface Message {
@@ -135,18 +152,69 @@ export class NexusDB {
     }
   }
 
-  registerAgent(role: string, description: string | null, pid: number): string {
+  registerAgent(
+    role: string,
+    description: string | null,
+    pid: number,
+    opts: RegisterOptions
+  ): string {
     this.pruneDeadAgents();
+
+    // Enforce one-live-agent-per-TTY. If a tty is provided and another row
+    // already holds it, the holder is either:
+    //   (a) live  → hard fail with a clear message (the user has two Claude
+    //       Code sessions in the same terminal pane, which is the footgun
+    //       this guard exists to catch)
+    //   (b) dead  → defensive cleanup (pruneDeadAgents already runs above so
+    //       this is unreachable in normal flow, but we don't want to rely on
+    //       liveness probe edge cases)
+    if (opts.tty) {
+      const existing = this.db
+        .prepare(`SELECT id, role, pid FROM agents WHERE tty = ?`)
+        .get(opts.tty) as { id: string; role: string; pid: number } | undefined;
+      if (existing) {
+        if (isProcessAlive(existing.pid)) {
+          throw new Error(
+            `TTY ${opts.tty} is already registered to agent "${existing.role}" (pid ${existing.pid}). ` +
+              `Deregister that agent first or open a new terminal.`
+          );
+        }
+        const cleanupStale = this.db.transaction(() => {
+          this.db.prepare(`DELETE FROM messages WHERE from_agent = ?`).run(existing.id);
+          this.db.prepare(`DELETE FROM bulletin WHERE from_agent = ?`).run(existing.id);
+          this.db.prepare(`DELETE FROM agents WHERE id = ?`).run(existing.id);
+        });
+        cleanupStale();
+      }
+    }
 
     const id = crypto.randomUUID();
 
     this.db
       .prepare(
-        `INSERT INTO agents (id, role, description, pid) VALUES (?, ?, ?, ?)`
+        `INSERT INTO agents (id, role, description, pid, tty, terminal_app, pane_id, autonomous_reply)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, role, description, pid);
+      .run(
+        id,
+        role,
+        description,
+        pid,
+        opts.tty,
+        opts.terminalApp,
+        opts.paneId,
+        opts.autonomousReply ? 1 : 0
+      );
 
     return id;
+  }
+
+  getAgentByTty(tty: string): Agent | null {
+    const row = this.db
+      .prepare(`SELECT * FROM agents WHERE tty = ?`)
+      .get(tty) as Omit<Agent, "alive"> | undefined;
+    if (!row) return null;
+    return { ...row, alive: isProcessAlive(row.pid) };
   }
 
   heartbeat(agentId: string): void {
@@ -172,7 +240,8 @@ export class NexusDB {
     fromId: string,
     toRole: string,
     content: string,
-    priority: string = "normal"
+    priority: string = "normal",
+    opts: SendOptions = {}
   ): number {
     const targets = this.db
       .prepare(`SELECT id FROM agents WHERE role = ?`)
@@ -184,13 +253,17 @@ export class NexusDB {
       );
     }
 
+    const expectsReply = opts.expectsReply !== false ? 1 : 0;
+    const parentId = opts.parentMessageId ?? null;
+
     const insert = this.db.prepare(
-      `INSERT INTO messages (from_agent, to_agent, content, priority) VALUES (?, ?, ?, ?)`
+      `INSERT INTO messages (from_agent, to_agent, content, priority, expects_reply, parent_id)
+       VALUES (?, ?, ?, ?, ?, ?)`
     );
 
     const sendAll = this.db.transaction(() => {
       for (const target of targets) {
-        insert.run(fromId, target.id, content, priority);
+        insert.run(fromId, target.id, content, priority, expectsReply, parentId);
       }
     });
 
@@ -198,12 +271,15 @@ export class NexusDB {
     return targets.length;
   }
 
-  broadcastMessage(fromId: string, content: string): void {
+  broadcastMessage(fromId: string, content: string, opts: SendOptions = {}): void {
+    const expectsReply = opts.expectsReply !== false ? 1 : 0;
+    const parentId = opts.parentMessageId ?? null;
     this.db
       .prepare(
-        `INSERT INTO messages (from_agent, to_agent, content, priority) VALUES (?, NULL, ?, 'normal')`
+        `INSERT INTO messages (from_agent, to_agent, content, priority, expects_reply, parent_id)
+         VALUES (?, NULL, ?, 'normal', ?, ?)`
       )
-      .run(fromId, content);
+      .run(fromId, content, expectsReply, parentId);
   }
 
   readInbox(agentId: string): Message[] {

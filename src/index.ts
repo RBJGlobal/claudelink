@@ -5,12 +5,51 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { execSync } from "child_process";
 import { NexusDB } from "./db.js";
 import { launchUIIfNeeded } from "./ui-launcher.js";
 
 const db = new NexusDB();
 let currentAgentId: string | null = null;
 let currentRole: string | null = null;
+
+// Auto-detect the controlling TTY of the parent process (Claude Code itself).
+// The MCP server's own stdin/stdout are pipes (JSON-RPC), so process.stdout.isTTY
+// is false. The parent inherits the terminal's controlling TTY, so ps against
+// the parent PID returns it. Returns "/dev/ttysNNN" or null.
+function detectTty(): string | null {
+  try {
+    const tty = execSync(`ps -p ${process.ppid} -o tty=`, {
+      encoding: "utf8",
+      timeout: 1000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (!tty || tty === "??" || tty === "?") return null;
+    return tty.startsWith("/dev/") ? tty : `/dev/${tty}`;
+  } catch {
+    return null;
+  }
+}
+
+function detectTerminalApp(): string | null {
+  if (process.env.TMUX) return "tmux";
+  const tp = process.env.TERM_PROGRAM;
+  if (tp === "iTerm.app") return "iterm2";
+  if (tp === "Apple_Terminal") return "terminal";
+  if (tp === "WezTerm") return "wezterm";
+  if (tp === "ghostty") return "ghostty";
+  if (tp) return tp.toLowerCase();
+  return null;
+}
+
+function detectPaneId(): string | null {
+  return (
+    process.env.TMUX_PANE ||
+    process.env.ITERM_SESSION_ID ||
+    process.env.WEZTERM_PANE ||
+    null
+  );
+}
 
 const server = new Server(
   { name: "ClaudeLink", version: "1.0.0" },
@@ -45,6 +84,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "Brief description of what you are working on",
           },
+          autonomousReply: {
+            type: "boolean",
+            description:
+              "Whether this agent should auto-process incoming messages via the Stop hook (default: true). Set to false for advisor-style agents that should read but never auto-reply.",
+          },
         },
         required: ["role"],
       },
@@ -66,6 +110,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             enum: ["low", "normal", "high"],
             description: "Message priority level (default: normal)",
           },
+          expectsReply: {
+            type: "boolean",
+            description:
+              "Whether this message expects a reply (default: true). Set to false for FYI/informational pings so the recipient's auto-reply Stop hook does not fire.",
+          },
+          parentMessageId: {
+            type: "number",
+            description:
+              "If this is a reply to another message, the parent message ID. Used by the auto-reply Stop hook for chain tracking; agents typically do not need to set this.",
+          },
         },
         required: ["to", "message"],
       },
@@ -79,6 +133,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           message: {
             type: "string",
             description: "The message to broadcast to all agents",
+          },
+          expectsReply: {
+            type: "boolean",
+            description:
+              "Whether this broadcast expects replies (default: true). Set to false for FYI announcements.",
           },
         },
         required: ["message"],
@@ -141,8 +200,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "register": {
         const role = args?.role as string;
         const description = (args?.description as string) || null;
+        const autonomousReply =
+          args?.autonomousReply === undefined ? true : Boolean(args.autonomousReply);
 
-        currentAgentId = db.registerAgent(role, description, process.pid);
+        currentAgentId = db.registerAgent(role, description, process.pid, {
+          tty: detectTty(),
+          terminalApp: detectTerminalApp(),
+          paneId: detectPaneId(),
+          autonomousReply,
+        });
         currentRole = role;
 
         // Heartbeat every 30 seconds
@@ -177,13 +243,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const to = args?.to as string;
         const message = args?.message as string;
         const priority = (args?.priority as string) || "normal";
+        const expectsReply =
+          args?.expectsReply === undefined ? true : Boolean(args.expectsReply);
+        const parentMessageId =
+          typeof args?.parentMessageId === "number" ? args.parentMessageId : null;
 
-        const count = db.sendMessage(agentId, to, message, priority);
+        const count = db.sendMessage(agentId, to, message, priority, {
+          expectsReply,
+          parentMessageId,
+        });
+        const fyi = expectsReply ? "" : " [FYI, no reply expected]";
         return {
           content: [
             {
               type: "text",
-              text: `Message sent to ${count} agent(s) with role "${to}" [priority: ${priority}]`,
+              text: `Message sent to ${count} agent(s) with role "${to}" [priority: ${priority}]${fyi}`,
             },
           ],
         };
@@ -192,8 +266,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "broadcast": {
         const agentId = requireRegistration();
         const message = args?.message as string;
+        const expectsReply =
+          args?.expectsReply === undefined ? true : Boolean(args.expectsReply);
 
-        db.broadcastMessage(agentId, message);
+        db.broadcastMessage(agentId, message, { expectsReply });
         const agents = db.getAgents().filter((a) => a.id !== agentId);
         return {
           content: [
@@ -221,8 +297,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               : msg.priority === "low"
                 ? " [low]"
                 : "";
+          const fyiTag = msg.expects_reply === 0 ? " [FYI]" : "";
           const from = msg.from_role || msg.from_agent.slice(0, 8);
-          response += `--- From: ${from}${priorityTag} (${msg.created_at}) ---\n${msg.content}\n\n`;
+          response += `--- From: ${from}${priorityTag}${fyiTag} (${msg.created_at}) ---\n${msg.content}\n\n`;
         }
 
         return { content: [{ type: "text", text: response }] };
