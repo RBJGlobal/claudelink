@@ -195,13 +195,183 @@ function showHelp() {
   Usage: claudelink <command>
 
   Commands:
-    init          Add ClaudeLink to .mcp.json in current project + CLAUDE.md
-    init --global Add ClaudeLink globally + ~/.claude/CLAUDE.md
-    status        Show registered agents and their status
-    ui            Launch the Command Center UI in your browser
-    ui --stop     Stop the Command Center UI
-    reset         Clear all messages and agent registrations
-    help          Show this help message
+    init                       Add ClaudeLink to .mcp.json in current project + CLAUDE.md
+    init --global              Add ClaudeLink globally + ~/.claude/CLAUDE.md
+    status                     Show registered agents and their status
+    ui                         Launch the Command Center UI in your browser
+    ui --stop                  Stop the Command Center UI
+    install-hooks              Install Stop + UserPromptSubmit hooks for autonomous replies (project)
+    install-hooks --global     Install hooks in ~/.claude/settings.json (all projects)
+    install-hooks --uninstall  Remove ClaudeLink hooks from the chosen scope
+    reset                      Clear all messages and agent registrations
+    help                       Show this help message
+  `);
+}
+
+// --- Hook installation (Path A) ---------------------------------------------
+// Idempotently installs the Stop + UserPromptSubmit hooks into the appropriate
+// settings.json. Never clobbers existing hook entries: we look for our
+// command name and skip if already present. The two hook scripts are
+// installed by npm into the same bin directory as `claudelink` itself, so
+// resolving an absolute path lets the install survive even if the user's
+// shell PATH is different from Claude Code's spawned-process PATH.
+
+const STOP_HOOK_BIN = "claudelink-stop-hook";
+const PROMPT_HOOK_BIN = "claudelink-prompt-hook";
+
+function resolveHookCommand(name: string): string {
+  // Prefer absolute path next to this CLI binary (works regardless of PATH).
+  // Falls back to bare name if we can't locate ourselves.
+  const candidates = [
+    path.join(path.dirname(process.argv[1] || ""), name),
+    path.join(__dirname, "..", "bin", name + ".js"),
+  ];
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) return c;
+  }
+  return name;
+}
+
+function settingsPath(scope: "global" | "project"): string {
+  return scope === "global"
+    ? path.join(os.homedir(), ".claude", "settings.json")
+    : path.join(process.cwd(), ".claude", "settings.json");
+}
+
+function readSettings(p: string): any {
+  if (!fs.existsSync(p)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf-8"));
+  } catch (e: any) {
+    throw new Error(
+      `Could not parse ${p}: ${e.message}. Refusing to overwrite — fix the JSON manually and rerun.`
+    );
+  }
+}
+
+function writeSettingsAtomic(p: string, settings: any): void {
+  const dir = path.dirname(p);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const tmp = p + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n");
+  fs.renameSync(tmp, p);
+}
+
+function hookEntryExists(settings: any, event: string, binName: string): boolean {
+  const events = settings?.hooks?.[event];
+  if (!Array.isArray(events)) return false;
+  for (const group of events) {
+    const groupHooks = group?.hooks;
+    if (!Array.isArray(groupHooks)) continue;
+    for (const h of groupHooks) {
+      if (typeof h?.command === "string" && h.command.endsWith(binName)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function appendHookEntry(
+  settings: any,
+  event: string,
+  command: string,
+  timeout: number
+): void {
+  if (!settings.hooks) settings.hooks = {};
+  if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+  settings.hooks[event].push({
+    matcher: "",
+    hooks: [{ type: "command", command, timeout }],
+  });
+}
+
+function removeHookEntries(settings: any, event: string, binName: string): number {
+  if (!Array.isArray(settings?.hooks?.[event])) return 0;
+  let removed = 0;
+  const filtered: any[] = [];
+  for (const group of settings.hooks[event]) {
+    const remaining = (group?.hooks || []).filter(
+      (h: any) => !(typeof h?.command === "string" && h.command.endsWith(binName))
+    );
+    if (remaining.length !== (group?.hooks || []).length) {
+      removed += (group?.hooks?.length || 0) - remaining.length;
+    }
+    if (remaining.length > 0) {
+      filtered.push({ ...group, hooks: remaining });
+    }
+  }
+  settings.hooks[event] = filtered;
+  if (settings.hooks[event].length === 0) delete settings.hooks[event];
+  return removed;
+}
+
+function installHooks(scope: "global" | "project", uninstall: boolean): void {
+  const p = settingsPath(scope);
+  let settings: any;
+  try {
+    settings = readSettings(p);
+  } catch (e: any) {
+    console.log(`  ${e.message}`);
+    return;
+  }
+
+  const stopCmd = resolveHookCommand(STOP_HOOK_BIN);
+  const promptCmd = resolveHookCommand(PROMPT_HOOK_BIN);
+
+  if (uninstall) {
+    const stopRemoved = removeHookEntries(settings, "Stop", STOP_HOOK_BIN);
+    const promptRemoved = removeHookEntries(settings, "UserPromptSubmit", PROMPT_HOOK_BIN);
+    if (stopRemoved + promptRemoved === 0) {
+      console.log(`  No ClaudeLink hooks found in ${p}. Nothing to remove.`);
+      return;
+    }
+    if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
+    writeSettingsAtomic(p, settings);
+    console.log(
+      `  Removed ${stopRemoved} Stop hook(s) and ${promptRemoved} UserPromptSubmit hook(s) from ${p}.`
+    );
+    return;
+  }
+
+  let stopAction: "added" | "skipped";
+  let promptAction: "added" | "skipped";
+
+  if (hookEntryExists(settings, "Stop", STOP_HOOK_BIN)) {
+    stopAction = "skipped";
+  } else {
+    appendHookEntry(settings, "Stop", stopCmd, 10);
+    stopAction = "added";
+  }
+
+  if (hookEntryExists(settings, "UserPromptSubmit", PROMPT_HOOK_BIN)) {
+    promptAction = "skipped";
+  } else {
+    appendHookEntry(settings, "UserPromptSubmit", promptCmd, 5);
+    promptAction = "added";
+  }
+
+  if (stopAction === "skipped" && promptAction === "skipped") {
+    console.log(`  ClaudeLink hooks already installed in ${p}. Nothing to do.`);
+    return;
+  }
+
+  writeSettingsAtomic(p, settings);
+  console.log(`  Updated ${p}:`);
+  console.log(`    Stop hook:              ${stopAction} (${stopCmd})`);
+  console.log(`    UserPromptSubmit hook:  ${promptAction} (${promptCmd})`);
+  console.log(`
+  Restart Claude Code in any terminal where you want autonomous replies
+  active. The hooks fire on Stop (when an agent finishes a turn) and
+  UserPromptSubmit (resets the per-terminal auto-fire counter).
+
+  Tunable env vars:
+    CLAUDELINK_HARD_CAP=5    consecutive auto-fires per terminal
+    CLAUDELINK_COOLDOWN_S=30 seconds between fires
+    CLAUDELINK_CHAIN_CAP=8   parent_id chain depth before excluding msg
+    CLAUDELINK_HOOK_STRICT=1 surface hook errors to stderr (dev mode)
+
+  Audit log: ~/.claudelink/auto-fire.log
   `);
 }
 
@@ -306,6 +476,12 @@ switch (command) {
     break;
   case "ui":
     uiCommand(args.includes("--stop") || args.includes("stop"));
+    break;
+  case "install-hooks":
+    installHooks(
+      args.includes("--global") ? "global" : "project",
+      args.includes("--uninstall")
+    );
     break;
   case "reset":
     resetDB();
