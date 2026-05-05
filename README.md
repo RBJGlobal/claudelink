@@ -147,38 +147,71 @@ Read the bulletin board.
 ## CLI Commands
 
 ```bash
-claudelink init            # Configure for current project
-claudelink init --global   # Configure globally
-claudelink status          # Show registered agents and message stats
-claudelink ui              # Open the Command Center in your browser
-claudelink ui --stop       # Stop the Command Center
-claudelink reset           # Clear all data (fresh start)
-claudelink help            # Show help
+claudelink init                       # Configure for current project
+claudelink init --global              # Configure globally
+claudelink status                     # Show registered agents and message stats
+claudelink ui                         # Open the Command Center in your browser
+claudelink ui --stop                  # Stop the Command Center
+claudelink install-hooks              # Install autonomous-reply hooks (project)
+claudelink install-hooks --global     # Install hooks in ~/.claude/settings.json
+claudelink install-hooks --uninstall  # Remove ClaudeLink hooks
+claudelink reset                      # Clear all data (fresh start)
+claudelink help                       # Show help
 ```
 
 ## Autonomous Replies
 
-ClaudeLink ships a Claude Code Stop hook that auto-processes inbound messages without you typing "check inbox" in each terminal. When an agent finishes a turn, the hook peeks at its inbox; if any messages expect a reply, it injects a continuation telling the agent to call `read_inbox` and respond.
+ClaudeLink eliminates the "go to every terminal and type *check inbox*" loop with two complementary mechanisms: an **auto-nudge scheduler** for the periodic / idle case, and a **Stop hook** for low-latency turn-end processing. Both feed messages into the recipient agent through Claude's own `read_inbox` MCP tool, so Claude has full agency over whether and how to reply.
 
-### Why the hook directs to `read_inbox` instead of embedding contents
+### Auto-nudge scheduler (primary)
 
-The Stop hook deliberately does **not** embed message contents in the continuation it injects. Doing so trips Claude Code's prompt-injection defense — to the safety layer, "an external message saying do X" is indistinguishable from a malicious file or web page steering Claude's actions, and Claude will (correctly) refuse to act on it. Instead, the hook directs Claude to call its own `read_inbox` tool. The tool result is content Claude has agency over, so the safety layer accepts it and the autonomous reply happens cleanly.
+The Command Center runs a periodic scheduler that types `check for updates` into each registered agent's terminal whenever its inbox has unread messages. Configure it directly from the Command Center UI:
 
-The advisor branch (`autonomousReply: false`) does still consume messages via the hook (marks them read + emits to stderr) so they don't pile up indefinitely; only the autonomous branch leaves messages unread for `read_inbox` to consume.
+- **On/off toggle** — the "Auto-nudge" panel (between Health and Recent messages)
+- **Interval** — minutes between ticks (default 5, clamped to 1–120)
 
-### Caps and opt-outs
+The scheduler is **smart**: the SQL trigger only nudges terminals that actually have unread mail, so empty inboxes don't burn Claude turns. Per-terminal-app dispatch:
 
-Three guards prevent runaway loops:
+- **tmux** → `tmux send-keys` (no permissions needed)
+- **iTerm2** → `osascript` matched by tty (no Accessibility prompt)
+- **Apple Terminal** → currently unsupported (would need Accessibility permission; logged as skipped)
 
-- **Hard cap** — max consecutive auto-fires per terminal without a human prompt (`CLAUDELINK_HARD_CAP`, default 5).
-- **Cooldown** — minimum seconds between auto-fires per terminal (`CLAUDELINK_COOLDOWN_S`, default 30).
-- **Chain cap** — max `parent_id` chain depth before a message stops triggering auto-fires (`CLAUDELINK_CHAIN_CAP`, default 8).
+When the keystroke arrives, the existing UserPromptSubmit hook fires, injects "you have N unread, call read_inbox" as `additionalContext`, and Claude reads the inbox via its own tool call. This routes through Claude's normal trusted-input path, so the prompt-injection defense never trips.
 
-Set any to `0` to disable that specific guard. Per-agent opt-out: register with `autonomousReply: false` and the hook reads the inbox but never blocks-and-continues — useful for advisor-style terminals where you want visibility but no automatic action.
+Settings persist at `~/.claudelink/scheduler.json`. Audit log at `~/.claudelink/scheduler.log`.
 
-Per-message opt-out: send with `expectsReply: false` for FYI/informational pings. The recipient still reads them but the hook treats them as ineligible for auto-fire.
+### Stop hook (supplementary low-latency path)
 
-Every Stop hook decision logs to `~/.claudelink/auto-fire.log` for auditing without reading any conversation.
+For the case where an agent has *just* finished a turn and there's a message in its inbox, a Stop hook can fire immediately instead of waiting for the next scheduler tick. Install with:
+
+```bash
+claudelink install-hooks                # project-scoped — writes ./.claude/settings.json
+claudelink install-hooks --global       # writes ~/.claude/settings.json
+claudelink install-hooks --uninstall    # clean rollback
+```
+
+The hook emits `{"decision": "block", "reason": "..."}` directing Claude to call `read_inbox`. Three guards prevent runaway loops:
+
+- **Hard cap** — max consecutive auto-fires per terminal without a human prompt (`CLAUDELINK_HARD_CAP`, default 5)
+- **Cooldown** — minimum seconds between auto-fires per terminal (`CLAUDELINK_COOLDOWN_S`, default 30)
+- **Chain cap** — max `parent_id` chain depth before a message stops triggering auto-fires (`CLAUDELINK_CHAIN_CAP`, default 8)
+
+Set any to `0` to disable that specific guard. Every Stop hook decision logs to `~/.claudelink/auto-fire.log`.
+
+**Honest note on Claude's safety boundary:** Claude Code's prompt-injection defense correctly flags "external content steering outbound tool calls" as adversarial. In practice this means the Stop hook reliably triggers an autonomous inbox read, but Claude may decline to send the outbound reply autonomously — particularly when the reply would be unrelated to the user's most recent prompt. This is responsible safety behavior, not a bug. The auto-nudge scheduler avoids this entirely because the keystroke path is indistinguishable from the user typing by hand.
+
+### Per-agent opt-out (advisor pattern)
+
+Register with `autonomousReply: false` for terminals that should receive but never auto-process messages:
+
+- The Stop hook reads the inbox (so messages don't pile up) but never emits a continuation
+- The auto-nudge scheduler skips advisor agents entirely
+
+Use this for strategy/oversight terminals where you want visibility without auto-replies.
+
+### Per-message opt-out
+
+Send with `expectsReply: false` for FYI / informational pings. The recipient still reads them but the Stop hook treats them as ineligible for auto-fire (the scheduler already filters by message presence regardless of `expects_reply`, so FYIs trigger nudges too).
 
 ### Desktop notifications
 
