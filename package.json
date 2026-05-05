@@ -1,6 +1,6 @@
 {
   "name": "claudelink",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "The hub where your AI agents connect. Multi-terminal Claude Code agent communication via MCP.",
   "main": "./dist/index.js",
   "bin": {
