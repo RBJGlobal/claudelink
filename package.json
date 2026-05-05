@@ -6,7 +6,9 @@
   "bin": {
     "claudelink": "./bin/cli.js",
     "claudelink-server": "./bin/server.js",
-    "claudelink-ui": "./bin/claudelink-ui.js"
+    "claudelink-ui": "./bin/claudelink-ui.js",
+    "claudelink-stop-hook": "./bin/stop-hook.js",
+    "claudelink-prompt-hook": "./bin/prompt-hook.js"
   },
   "scripts": {
     "build": "tsc",

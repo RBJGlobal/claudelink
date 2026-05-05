@@ -156,6 +156,33 @@ claudelink reset           # Clear all data (fresh start)
 claudelink help            # Show help
 ```
 
+## Autonomous Replies
+
+ClaudeLink ships a Claude Code Stop hook that auto-processes inbound messages without you typing "check inbox" in each terminal. When an agent finishes a turn, the hook reads its inbox; if any messages expect a reply, it injects them as a continuation so the agent acts on them immediately.
+
+### Read-state semantics (important for fresh readers)
+
+When the Stop hook fires, the messages it forwards into the continuation **are already marked read in the DB**. A subsequent `read_inbox` call from the same agent returns `[]` even though the message contents appeared in the prior continuation. This is correct: the messages were consumed by the hook (single source of truth = the DB), and the hook hands their contents to Claude in the same step. If you see "agent acted on a message that read_inbox now says doesn't exist," that's the auto-reply path doing its job, not a bug.
+
+### Caps and opt-outs
+
+Three guards prevent runaway loops:
+
+- **Hard cap** — max consecutive auto-fires per terminal without a human prompt (`CLAUDELINK_HARD_CAP`, default 5).
+- **Cooldown** — minimum seconds between auto-fires per terminal (`CLAUDELINK_COOLDOWN_S`, default 30).
+- **Chain cap** — max `parent_id` chain depth before a message stops triggering auto-fires (`CLAUDELINK_CHAIN_CAP`, default 8).
+
+Set any to `0` to disable that specific guard. Per-agent opt-out: register with `autonomousReply: false` and the hook reads the inbox but never blocks-and-continues — useful for advisor-style terminals where you want visibility but no automatic action.
+
+Per-message opt-out: send with `expectsReply: false` for FYI/informational pings. The recipient still reads them but the hook treats them as ineligible for auto-fire.
+
+Every Stop hook decision logs to `~/.claudelink/auto-fire.log` for auditing without reading any conversation.
+
+### Debug knobs
+
+- `CLAUDELINK_HOOK_TTY=/dev/ttysNNN` — override TTY auto-detection (testing, CI).
+- `CLAUDELINK_HOOK_STRICT=1` — surface hook errors to stderr instead of swallowing them. Default is fail-open (production safety).
+
 ## Autonomous Mode (Recommended)
 
 By default, you'd have to tell Claude "check my inbox" manually every time. That defeats the purpose. With autonomous mode, agents communicate **on their own** — checking for messages and sending updates without you asking.

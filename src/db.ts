@@ -223,6 +223,40 @@ export class NexusDB {
       .run(agentId);
   }
 
+  // Stamp the moment the Stop hook fired for this agent's terminal. Used by
+  // Path B's idle-detection: a UI watcher that sees a registered agent whose
+  // last_seen_active_ts is older than X minutes can fall back to terminal
+  // injection rather than trusting the in-flight Stop hook to handle a new
+  // message.
+  updateLastSeenActive(agentId: string): void {
+    this.db
+      .prepare(`UPDATE agents SET last_seen_active_ts = ? WHERE id = ?`)
+      .run(Date.now(), agentId);
+  }
+
+  // Walk the parent_id chain backwards from a message and return the chain
+  // length (1 = root, no parent). Used by the Stop hook's chain cap to break
+  // A→B→A→B... ping-pong loops at a configurable hop limit.
+  // Cycle-safe via a seen-set; in practice messages.parent_id should form a
+  // strict DAG since each new message gets a fresh autoincrement id, but we
+  // don't trust the schema to be free of operator error.
+  getChainLength(messageId: number): number {
+    let length = 1;
+    let current: number | null = messageId;
+    const seen = new Set<number>();
+    while (current !== null) {
+      if (seen.has(current)) break;
+      seen.add(current);
+      const row = this.db
+        .prepare(`SELECT parent_id FROM messages WHERE id = ?`)
+        .get(current) as { parent_id: number | null } | undefined;
+      if (!row || row.parent_id === null) break;
+      current = row.parent_id;
+      length++;
+    }
+    return length;
+  }
+
   getAgents(): Agent[] {
     this.pruneDeadAgents();
 

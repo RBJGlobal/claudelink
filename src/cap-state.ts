@@ -141,7 +141,13 @@ export function resetCounter(tty: string): void {
 export function appendAutoFireLog(entry: {
   tty: string;
   agentRole: string | null;
-  decision: "fired" | "blocked-by-cap" | "no-eligible-msgs" | "opt-out" | "no-agent";
+  decision:
+    | "fired"
+    | "blocked-by-cap"
+    | "no-eligible-msgs"
+    | "opt-out"
+    | "no-agent"
+    | "counter-reset";
   reason: string;
   inboundCount?: number;
 }): void {
