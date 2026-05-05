@@ -22,6 +22,8 @@ export interface Message {
   content: string;
   priority: string;
   created_at: string;
+  parent_id: number | null;
+  expects_reply: number;
 }
 
 export interface BulletinEntry {
@@ -60,6 +62,7 @@ export class NexusDB {
   }
 
   private migrate(): void {
+    // v1 — initial schema. Idempotent CREATEs so fresh installs land here.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY,
@@ -93,6 +96,43 @@ export class NexusDB {
       CREATE INDEX IF NOT EXISTS idx_messages_read ON messages(read);
       CREATE INDEX IF NOT EXISTS idx_agents_role ON agents(role);
     `);
+
+    const userVersion = this.db.pragma("user_version", { simple: true }) as number;
+
+    // v2 — autonomous-reply scaffolding + Path B prep.
+    // Rollback (SQLite 3.35+ supports DROP COLUMN; better-sqlite3 v12 ships it):
+    //   DROP INDEX IF EXISTS idx_messages_parent;
+    //   DROP INDEX IF EXISTS idx_agents_tty;
+    //   ALTER TABLE messages DROP COLUMN expects_reply;
+    //   ALTER TABLE messages DROP COLUMN parent_id;
+    //   ALTER TABLE agents   DROP COLUMN autonomous_reply;
+    //   ALTER TABLE agents   DROP COLUMN last_seen_active_ts;
+    //   ALTER TABLE agents   DROP COLUMN pane_id;
+    //   ALTER TABLE agents   DROP COLUMN terminal_app;
+    //   ALTER TABLE agents   DROP COLUMN tty;
+    //   PRAGMA user_version = 1;
+    if (userVersion < 2) {
+      // Wrap the entire v2 step in one transaction so a mid-migration
+      // failure (OOM, disk full, kill -9) rolls back cleanly. Otherwise
+      // a half-applied migration is unrecoverable: ALTER TABLE ADD COLUMN
+      // has no IF NOT EXISTS form, so a re-run would fail on the columns
+      // that did land.
+      const applyV2 = this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE agents   ADD COLUMN tty TEXT;
+          ALTER TABLE agents   ADD COLUMN terminal_app TEXT;
+          ALTER TABLE agents   ADD COLUMN pane_id TEXT;
+          ALTER TABLE agents   ADD COLUMN last_seen_active_ts INTEGER;
+          ALTER TABLE agents   ADD COLUMN autonomous_reply INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE messages ADD COLUMN parent_id INTEGER;
+          ALTER TABLE messages ADD COLUMN expects_reply INTEGER NOT NULL DEFAULT 1;
+          CREATE INDEX IF NOT EXISTS idx_agents_tty ON agents(tty);
+          CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
+          PRAGMA user_version = 2;
+        `);
+      });
+      applyV2();
+    }
   }
 
   registerAgent(role: string, description: string | null, pid: number): string {
@@ -167,34 +207,31 @@ export class NexusDB {
   }
 
   readInbox(agentId: string): Message[] {
-    const readMessages = this.db.transaction(() => {
-      const rows = this.db
-        .prepare(
-          `SELECT m.id, m.from_agent, m.to_agent, m.content, m.priority, m.created_at,
-                  a.role as from_role
-           FROM messages m
-           LEFT JOIN agents a ON m.from_agent = a.id
-           WHERE (m.to_agent = ? OR m.to_agent IS NULL)
-             AND m.from_agent != ?
-             AND m.read = 0
-           ORDER BY m.created_at ASC`
-        )
-        .all(agentId, agentId) as Message[];
+    // Atomic claim: UPDATE...RETURNING marks rows read AND returns them in
+    // one statement, removing the SELECT-then-UPDATE snapshot-staleness
+    // window. from_role is resolved via correlated subquery in RETURNING
+    // (SQLite 3.35+ supports expressions in RETURNING). RETURNING does not
+    // guarantee order, so we sort in JS afterwards.
+    const rows = this.db
+      .prepare(
+        `UPDATE messages SET read = 1
+         WHERE (to_agent = ? OR to_agent IS NULL)
+           AND from_agent != ?
+           AND read = 0
+         RETURNING id,
+                   from_agent,
+                   to_agent,
+                   content,
+                   priority,
+                   created_at,
+                   parent_id,
+                   expects_reply,
+                   (SELECT role FROM agents WHERE id = messages.from_agent) AS from_role`
+      )
+      .all(agentId, agentId) as Message[];
 
-      if (rows.length > 0) {
-        const ids = rows.map((r) => r.id);
-        const placeholders = ids.map(() => "?").join(",");
-        this.db
-          .prepare(
-            `UPDATE messages SET read = 1 WHERE id IN (${placeholders})`
-          )
-          .run(...ids);
-      }
-
-      return rows;
-    });
-
-    return readMessages();
+    rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return rows;
   }
 
   postBulletin(fromId: string, content: string): void {
