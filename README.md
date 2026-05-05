@@ -11,6 +11,10 @@ Terminal 3 (tester)    ──┤
 Terminal 4 (ops)       ──┘
 ```
 
+A local **Command Center** at `http://127.0.0.1:7878` opens automatically with the first agent — see who's online, watch messages flow, and kill stuck servers without touching the terminal.
+
+![ClaudeLink Command Center](docs/assets/command-center.png)
+
 ## Quick Start
 
 ```bash
@@ -70,6 +74,30 @@ ClaudeLink is an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/
 
 There is no daemon or background service. Each Claude Code session spawns its own MCP server process, and they coordinate through the shared database.
 
+## Command Center
+
+The Command Center is a local web UI at `http://127.0.0.1:7878` that gives you a live view of every agent in the mesh. The first `claudelink-server` to boot in any terminal launches it automatically — subsequent agents share the same window. It survives MCP restarts and only exits when you click **Quit UI** (or run `claudelink ui --stop`).
+
+### What it shows
+
+- **Running servers** — every `claudelink-server` process, with PID, TTY, uptime, and the role it registered as. Per-row **Kill** button sends SIGTERM.
+- **Registered agents** — role, description, online status, message counts (sent / received), and last-seen timestamp. Per-row **Kill agent** SIGTERMs the matching server.
+- **Health** — total agents, unread/total messages, bulletin entries, orphan blockers, FK violations, and servers running. The **Heal orphans** button cascade-cleans every dead agent's messages and bulletin rows in one transaction.
+- **Recent messages** — the last several messages across all agents, with unread and priority badges.
+
+The page auto-refreshes every 2 seconds. **Kill all servers** in the header drops the whole mesh in one click.
+
+### Lifecycle
+
+A lock file at `~/.claudelink/ui.lock` prevents duplicate windows. The launcher detached-spawns the UI process with `unref()` so it outlives the MCP parent. If a stale lock is detected (PID dead and no heartbeat at `/api/heartbeat`), a fresh UI takes over.
+
+To opt out, set `CLAUDELINK_UI=off` in the environment before starting Claude Code.
+
+```bash
+claudelink ui          # start it manually (or just spawn any agent)
+claudelink ui --stop   # graceful shutdown
+```
+
 ## Available Tools
 
 Once connected, Claude Code gains these tools:
@@ -122,6 +150,8 @@ Read the bulletin board.
 claudelink init            # Configure for current project
 claudelink init --global   # Configure globally
 claudelink status          # Show registered agents and message stats
+claudelink ui              # Open the Command Center in your browser
+claudelink ui --stop       # Stop the Command Center
 claudelink reset           # Clear all data (fresh start)
 claudelink help            # Show help
 ```
@@ -451,7 +481,6 @@ node dist/cli.js status
 - **Message history**: Tool to view past messages (not just unread)
 - **File sharing**: Agents can share file paths or code snippets with structured formatting
 - **Priority notifications**: Interrupt the current agent when a high-priority message arrives
-- **Web dashboard**: A local web UI to visualize agent activity
 - **Agent templates**: Pre-built role configurations for common workflows
 - **Webhooks**: Notify external services when agents communicate
 - **Encryption**: Encrypt messages at rest in the database
