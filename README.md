@@ -178,10 +178,19 @@ Per-message opt-out: send with `expectsReply: false` for FYI/informational pings
 
 Every Stop hook decision logs to `~/.claudelink/auto-fire.log` for auditing without reading any conversation.
 
+### Desktop notifications
+
+The Command Center fires a macOS desktop notification (via `osascript display notification`, no Accessibility permission required) for every new message that lands in any agent's inbox — including agents registered with `autonomousReply: false`. Notifications give you situational awareness across the swarm without switching terminals.
+
+Multiple messages arriving in the same 2-second poll window collapse into one summary notification ("3 new ClaudeLink messages: reviewer → developer: ... (+2 more)"). The historical backlog is suppressed at startup so a freshly opened Command Center doesn't spam you with old messages.
+
+Off-switch: `CLAUDELINK_NOTIFY=off`.
+
 ### Debug knobs
 
 - `CLAUDELINK_HOOK_TTY=/dev/ttysNNN` — override TTY auto-detection (testing, CI).
 - `CLAUDELINK_HOOK_STRICT=1` — surface hook errors to stderr instead of swallowing them. Default is fail-open (production safety).
+- `CLAUDELINK_NOTIFY=off` — disable desktop notifications.
 
 ## Autonomous Mode (Recommended)
 

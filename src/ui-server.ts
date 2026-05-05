@@ -637,6 +637,8 @@ export function startUIServer(port = 7878): http.Server {
 
   server.listen(port, "127.0.0.1");
 
+  const stopNotifier = startMessageNotifier();
+
   const writeLock = () => {
     try {
       fs.writeFileSync(
@@ -654,9 +656,132 @@ export function startUIServer(port = 7878): http.Server {
       if (lock.pid === process.pid) fs.unlinkSync(LOCK_PATH);
     } catch {}
   };
-  process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-  process.on("SIGINT", () => { cleanup(); process.exit(0); });
-  process.on("exit", cleanup);
+  process.on("SIGTERM", () => { stopNotifier(); cleanup(); process.exit(0); });
+  process.on("SIGINT", () => { stopNotifier(); cleanup(); process.exit(0); });
+  process.on("exit", () => { stopNotifier(); cleanup(); });
 
   return server;
+}
+
+// --- Path C: desktop notifications -----------------------------------------
+// Polls the messages table for new ids since the last tick and fires a macOS
+// `display notification` for each batch. Polls because better-sqlite3's
+// update_hook only fires on changes via the same connection — MCP servers
+// writing from other processes wouldn't trigger it. Native macOS Notification
+// Center via osascript needs no Accessibility permission.
+//
+// Fires regardless of the recipient agent's autonomous_reply flag — the
+// notification is for the human watching the swarm, not for the agent.
+//
+// Off-switch: CLAUDELINK_NOTIFY=off
+// On non-darwin platforms this is a silent no-op.
+
+const NOTIFY_POLL_MS = 2000;
+
+function escapeForOsascript(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/[\r\n\t]+/g, " ")
+    .trim();
+}
+
+function fireDesktopNotification(title: string, body: string): void {
+  if (process.platform !== "darwin") return;
+  if (process.env.CLAUDELINK_NOTIFY === "off") return;
+  const t = escapeForOsascript(title).slice(0, 80);
+  const b = escapeForOsascript(body).slice(0, 200);
+  try {
+    execFileSync(
+      "osascript",
+      ["-e", `display notification "${b}" with title "${t}"`],
+      { timeout: 1500, stdio: ["ignore", "ignore", "ignore"] }
+    );
+  } catch {
+    // Notifications must never break the UI server.
+  }
+}
+
+interface NotifyRow {
+  id: number;
+  from_agent: string;
+  to_agent: string | null;
+  content: string;
+  from_role: string | null;
+  to_role: string | null;
+}
+
+function startMessageNotifier(): () => void {
+  if (process.env.CLAUDELINK_NOTIFY === "off") {
+    return () => {};
+  }
+
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(DB_PATH, { readonly: true });
+  } catch {
+    return () => {};
+  }
+
+  // Initialize lastSeenId = current max so we don't notify on the historical
+  // backlog when the UI starts. Only NEW inserts past this point fire.
+  let lastSeenId = 0;
+  try {
+    const row = db
+      .prepare("SELECT COALESCE(MAX(id), 0) AS m FROM messages")
+      .get() as { m: number };
+    lastSeenId = row.m;
+  } catch {
+    // messages table doesn't exist yet (very first boot). Treat as id=0.
+  }
+
+  const tick = (): void => {
+    if (!db) return;
+    let rows: NotifyRow[] = [];
+    try {
+      rows = db
+        .prepare(
+          `SELECT m.id, m.from_agent, m.to_agent, m.content,
+                  (SELECT role FROM agents WHERE id = m.from_agent) AS from_role,
+                  (SELECT role FROM agents WHERE id = m.to_agent)   AS to_role
+           FROM messages m
+           WHERE m.id > ?
+           ORDER BY m.id ASC`
+        )
+        .all(lastSeenId) as NotifyRow[];
+    } catch {
+      return;
+    }
+    if (rows.length === 0) return;
+    lastSeenId = rows[rows.length - 1].id;
+
+    if (rows.length === 1) {
+      const r = rows[0];
+      const from = r.from_role || "agent";
+      const to = r.to_role || (r.to_agent === null ? "broadcast" : "agent");
+      fireDesktopNotification(`${from} → ${to}`, r.content);
+    } else {
+      // Collapse: title summarizes count, body shows the first message.
+      const r = rows[0];
+      const from = r.from_role || "agent";
+      const to = r.to_role || (r.to_agent === null ? "broadcast" : "agent");
+      const more = rows.length - 1;
+      fireDesktopNotification(
+        `${rows.length} new ClaudeLink messages`,
+        `${from} → ${to}: ${r.content} (+${more} more)`
+      );
+    }
+  };
+
+  const interval = setInterval(() => {
+    try { tick(); } catch { /* never crash */ }
+  }, NOTIFY_POLL_MS);
+
+  return () => {
+    clearInterval(interval);
+    if (db) {
+      try { db.close(); } catch {}
+      db = null;
+    }
+  };
 }
