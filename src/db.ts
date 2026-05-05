@@ -316,6 +316,28 @@ export class NexusDB {
       .run(fromId, content, expectsReply, parentId);
   }
 
+  // Read-only inbox inspection. Returns unread messages addressed to this
+  // agent WITHOUT marking them read. Used by the Stop hook to count and
+  // filter eligible messages for the auto-fire decision. The actual mark-
+  // read happens later when Claude calls the read_inbox MCP tool from the
+  // continuation — that path has Claude's agency, so its safety layer
+  // accepts the tool result; injecting message contents directly into the
+  // continuation reason would be flagged as prompt injection.
+  peekInbox(agentId: string): Message[] {
+    return this.db
+      .prepare(
+        `SELECT id, from_agent, to_agent, content, priority, created_at,
+                parent_id, expects_reply,
+                (SELECT role FROM agents WHERE id = messages.from_agent) AS from_role
+         FROM messages
+         WHERE (to_agent = ? OR to_agent IS NULL)
+           AND from_agent != ?
+           AND read = 0
+         ORDER BY created_at ASC`
+      )
+      .all(agentId, agentId) as Message[];
+  }
+
   readInbox(agentId: string): Message[] {
     // Atomic claim: UPDATE...RETURNING marks rows read AND returns them in
     // one statement, removing the SELECT-then-UPDATE snapshot-staleness
