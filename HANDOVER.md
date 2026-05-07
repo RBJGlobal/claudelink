@@ -2,13 +2,21 @@
 
 > **Purpose:** First thing to read when resuming work on the claudelink package itself. `CLAUDE.md` is the always-on directive layer; this file is the session-resume pointer.
 >
-> **Last session:** 2026-05-06
+> **Last session:** 2026-05-07
 
 ---
 
-## Current status: per-agent autonomous-reply toggle added to Command Center (uncommitted)
+## Current status: v1.1.2 tagged + pushed to GitHub; npm publish pending user OTP
 
-Local changes pending in `src/db.ts`, `src/ui-server.ts`, `CLAUDE.md` — see "What was added on 2026-05-06" below. Build is green. UI hot-restarted and backend round-trips verified via curl. **Not yet committed; not yet released.**
+Feature commit `8f80d79`, release commit `d4ee281`, tag `v1.1.2` — all on `origin/main`. The package has 2FA-on-publish enabled, so `npm publish` requires a fresh browser OTP each time and could not be completed autonomously. **First action on resume: run `npm publish` from the user's terminal, complete the browser OTP, then `npm view claudelink version` to verify 1.1.2 is on registry.**
+
+The README + screenshot updates in this release are README-on-npmjs.com critical: until `npm publish` lands, the package page on npmjs.com still shows the v1.1.1 README without the autonomous-pipeline framing or the new Command Center screenshot.
+
+## What was added on 2026-05-07
+
+A new **Model selection policy** section was added to the top of `CLAUDE.md` per a directive from the Clawless Advisor terminal — Sonnet 4.6 default, Opus 4.7 escalation list (protocol design, race-condition reasoning, security-relevant work). Iterative tuning expected over the first 3-4 days.
+
+The README and screenshot were also refreshed to lead with the autonomous pipeline as the headline capability (not a footnote): new "Why this is different" section walks through the 5-step closed-loop flow, the Command Center section calls out the per-agent Auto-reply toggle and Auto-nudge panel as first-class features, and the screenshot was regenerated with sanitized demo agents (reviewer / developer / tester / architect / ops) showing the architect deliberately set to Auto-reply OFF to illustrate the per-agent control.
 
 ## What was added on 2026-05-06
 
