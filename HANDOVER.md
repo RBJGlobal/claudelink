@@ -2,11 +2,31 @@
 
 > **Purpose:** First thing to read when resuming work on the claudelink package itself. `CLAUDE.md` is the always-on directive layer; this file is the session-resume pointer.
 >
-> **Last session:** 2026-05-05
+> **Last session:** 2026-05-06
 
 ---
 
-## Current status: v1.1.0 + v1.1.1 shipped, auto-nudge scheduler is live as the primary autonomous-reply mechanism
+## Current status: per-agent autonomous-reply toggle added to Command Center (uncommitted)
+
+Local changes pending in `src/db.ts`, `src/ui-server.ts`, `CLAUDE.md` — see "What was added on 2026-05-06" below. Build is green. UI hot-restarted and backend round-trips verified via curl. **Not yet committed; not yet released.**
+
+## What was added on 2026-05-06
+
+The Command Center's agents table now has a per-agent **Auto-reply** toggle column. Flipping it writes `agents.autonomous_reply` directly. Lifetime is until the agent re-registers (terminal close + reopen) — the toggle is a session-level override, not a sticky setting.
+
+| File | Change |
+|---|---|
+| `src/db.ts` | `NexusDB.setAutonomousReply(agentId, enabled): boolean` — single-row UPDATE returning whether anything matched. |
+| `src/ui-server.ts` | `/api/state` agents now include `autonomous_reply`. New `POST /api/agents/:id/autonomous` endpoint with body `{enabled:boolean}` and 400/404 paths. New "Auto-reply" column with checkbox + on/off pill, optimistic flip on change with revert-on-failure. Live-row only — dead-agent rows show static text since flipping a stale row is meaningless. |
+| `CLAUDE.md` | Endpoint list updated with the new route + lifetime caveat. |
+
+### Why a session-level override (not sticky)
+
+An agent's `autonomousReply` value is *inferred* at register time, not declared in any project file. The agent reads its role description (e.g. "advisor-style"), reads the `register` tool's parameter doc ("set false for advisor-style"), and chooses. If the user wants to flip an agent's default permanently, the right place is the role doc itself (e.g. `ADVISOR-ROLE.md`), not a separate override table.
+
+For sticky overrides we'd need an `agent_overrides` table the register call consults before honoring its own incoming value. Deferred — the session-level toggle is enough for the user's stated workflow ("flip on for the morning, flip off when I want the advisor deliberate again").
+
+## Prior status: v1.1.0 + v1.1.1 shipped, auto-nudge scheduler is live as the primary autonomous-reply mechanism
 
 Two npm releases landed today:
 

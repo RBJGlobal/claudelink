@@ -1,19 +1,38 @@
 # ClaudeLink
 
-**The hub where your AI agents connect.**
+**Multiple Claude Code agents. One shared mesh. Fully autonomous.**
 
-ClaudeLink lets multiple Claude Code instances running in separate terminals communicate with each other in real time. Open four terminals, give each agent a role, and watch them collaborate — sending messages, sharing findings, and coordinating work through a shared bulletin board.
+ClaudeLink lets Claude Code instances running in separate terminals talk to each other in real time, *and keep talking* when you walk away from the keyboard. Open four terminals, give each agent a role, flip on the auto-nudge timer, and the swarm runs itself: messages route between agents, recipients pick up their inbox automatically, and you watch the whole thing live in a local Command Center.
 
 ```
 Terminal 1 (reviewer)  ──┐
 Terminal 2 (developer) ──┤── ClaudeLink ── SQLite
-Terminal 3 (tester)    ──┤
-Terminal 4 (ops)       ──┘
+Terminal 3 (tester)    ──┤        │
+Terminal 4 (ops)       ──┘        │
+                                  ▼
+                  ┌──────────────────────────────┐
+                  │  Auto-nudge scheduler ticks  │
+                  │  → checks who has unread     │
+                  │  → types "check for updates" │
+                  │  → recipient processes inbox │
+                  └──────────────────────────────┘
 ```
 
-A local **Command Center** at `http://127.0.0.1:7878` opens automatically with the first agent — see who's online, watch messages flow, and kill stuck servers without touching the terminal.
+A local **Command Center** at `http://127.0.0.1:7878` opens automatically with the first agent — see who's online, watch messages flow, toggle autonomous reply per agent, configure the auto-nudge timer, and kill stuck servers without touching the terminal.
 
 ![ClaudeLink Command Center](docs/assets/command-center.png)
+
+## Why this is different
+
+Most multi-agent setups need a human in the loop typing "check messages" into every terminal. ClaudeLink ships a **closed-loop autonomous pipeline**:
+
+1. Agent A sends a message to Agent B's role.
+2. The auto-nudge scheduler sees Agent B has unread mail.
+3. It types `check for updates` straight into Agent B's terminal — exactly as if you typed it yourself.
+4. Agent B's prompt-submit hook detects the unread mail and routes Claude to read its inbox.
+5. Claude reads the message and decides what to do next — reply, act, broadcast, anything.
+
+The keystroke path is indistinguishable from a human typing, so it cleanly sidesteps Claude Code's prompt-injection defenses without any unsafe shortcuts. **You set the cadence, you set who participates, you walk away. The agents keep collaborating.**
 
 ## Quick Start
 
@@ -81,8 +100,9 @@ The Command Center is a local web UI at `http://127.0.0.1:7878` that gives you a
 ### What it shows
 
 - **Running servers** — every `claudelink-server` process, with PID, TTY, uptime, and the role it registered as. Per-row **Kill** button sends SIGTERM.
-- **Registered agents** — role, description, online status, message counts (sent / received), and last-seen timestamp. Per-row **Kill agent** SIGTERMs the matching server.
+- **Registered agents** — role, description, online status, **per-agent Auto-reply toggle** (flip whether the auto-nudge scheduler can wake this agent up), message counts (sent / received), and last-seen timestamp. Per-row **Kill agent** SIGTERMs the matching server.
 - **Health** — total agents, unread/total messages, bulletin entries, orphan blockers, FK violations, and servers running. The **Heal orphans** button cascade-cleans every dead agent's messages and bulletin rows in one transaction.
+- **Auto-nudge** — global on/off and the tick interval (1–120 minutes). When on, the scheduler checks every interval for agents with unread mail and types `check for updates` into each one's terminal. Settings persist across UI restarts.
 - **Recent messages** — the last several messages across all agents, with unread and priority badges.
 
 The page auto-refreshes every 2 seconds. **Kill all servers** in the header drops the whole mesh in one click.
@@ -202,12 +222,15 @@ Set any to `0` to disable that specific guard. Every Stop hook decision logs to 
 
 ### Per-agent opt-out (advisor pattern)
 
-Register with `autonomousReply: false` for terminals that should receive but never auto-process messages:
+Two ways to control whether a given agent participates in autonomous reply:
 
+**1. Set it at registration** — register with `autonomousReply: false` for terminals that should receive but never auto-process messages. Useful as a default for advisor / strategy terminals.
+
+**2. Toggle live from the Command Center** — the **Auto-reply** column in the agents panel has a per-row checkbox. Flip it any time. The change is live and applies on the next scheduler tick. Lifetime: holds until the agent re-registers (i.e., until you close and reopen that Claude Code session). Perfect for "I want my advisor on auto-pilot during the morning standup, then quiet again while I think."
+
+When opted out:
 - The Stop hook reads the inbox (so messages don't pile up) but never emits a continuation
-- The auto-nudge scheduler skips advisor agents entirely
-
-Use this for strategy/oversight terminals where you want visibility without auto-replies.
+- The auto-nudge scheduler skips that agent at the SQL filter — no keystroke is sent
 
 ### Per-message opt-out
 

@@ -2,6 +2,12 @@
 
 > **Resuming work?** Read `HANDOVER.md` first — it captures the last session's status and what to test next.
 
+## Model selection policy
+
+**Default Sonnet 4.6.** Escalate to **Opus 4.7** for: protocol design changes (MCP server contract, hooks contract, message-routing semantics), multi-process race-condition reasoning, security-relevant work (auth tokens, scope validation, untrusted-message handling). Infrastructure CRUD, scaffolding, deployment work, CLI development run Sonnet. Subagent Explore + Plan default Sonnet.
+
+*Iterative; advisor tunes over the first 3-4 days. If you escalate to Opus mid-task on something the policy says is Sonnet, capture for the next calibration pass.*
+
 ## Project layout
 
 ClaudeLink is a Node + TypeScript MCP server with a SQLite shared-state DB and a local web Command Center.
@@ -29,6 +35,7 @@ ClaudeLink is a Node + TypeScript MCP server with a SQLite shared-state DB and a
 - `POST /api/kill-all` — SIGTERM every `claudelink-server` (excluding self)
 - `POST /api/heal` — cascade-clean every dead agent's messages/bulletin/agent rows in one tx
 - `POST /api/remove-stale/:agentId` — single-agent cascade clean
+- `POST /api/agents/:id/autonomous` — flip a single agent's `autonomous_reply` flag. Body: `{enabled:boolean}`. Session-scoped: holds until that agent re-registers (terminal close+reopen).
 - `POST /api/quit-ui` — graceful UI shutdown, removes the lock file
 - `GET  /api/scheduler` — `{ enabled, intervalMin }` for the auto-nudge scheduler
 - `POST /api/scheduler` — partial update; rewrites `scheduler.json` atomically and reschedules in-process via `schedulerHandle.reschedule()`

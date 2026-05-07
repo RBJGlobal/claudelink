@@ -30,6 +30,7 @@ interface AgentRow {
   last_seen: string;
   pid: number;
   alive: boolean;
+  autonomous_reply: number;
   msgs_from: number;
   msgs_to: number;
 }
@@ -102,6 +103,7 @@ function getState(): {
   const agents = db
     .prepare(
       `SELECT a.id, a.role, a.description, a.registered_at, a.last_seen, a.pid,
+              a.autonomous_reply,
               (SELECT COUNT(*) FROM messages m WHERE m.from_agent = a.id) AS msgs_from,
               (SELECT COUNT(*) FROM messages m WHERE m.to_agent   = a.id) AS msgs_to
          FROM agents a
@@ -191,6 +193,18 @@ function healOrphans(): { deleted_messages: number; pruned_agents: number } {
   const result = tx();
   db.close();
   return result;
+}
+
+function setAutonomousReply(agentId: string, enabled: boolean): boolean {
+  const db = new Database(DB_PATH);
+  try {
+    const r = db
+      .prepare(`UPDATE agents SET autonomous_reply = ? WHERE id = ?`)
+      .run(enabled ? 1 : 0, agentId);
+    return r.changes > 0;
+  } finally {
+    db.close();
+  }
 }
 
 function removeStaleAgent(agentId: string): boolean {
@@ -313,6 +327,10 @@ const HTML = String.raw`<!doctype html>
   .nudge-status.show { opacity: 1; }
   .nudge-hint { color: var(--muted); font-size: 12px; padding: 0 16px 14px; line-height: 1.5; margin: 0; }
   .nudge-hint .mono { color: var(--text); }
+  .auto-reply-cell { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; user-select: none; }
+  .auto-reply-cell input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent); margin: 0; }
+  .auto-reply-cell .lbl { font-size: 11px; color: var(--muted); min-width: 22px; }
+  .auto-reply-cell .lbl.on { color: var(--green); }
   .msg-row { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .msg-row:last-child { border-bottom: none; }
   .msg-row .meta { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
@@ -351,7 +369,7 @@ const HTML = String.raw`<!doctype html>
     <h2>Registered agents <span class="count" id="agt-count">0</span></h2>
     <div class="body">
       <table id="agt-table">
-        <thead><tr><th>Role</th><th>PID</th><th>Status</th><th>Msgs</th><th>Last seen</th><th></th></tr></thead>
+        <thead><tr><th>Role</th><th>PID</th><th>Status</th><th>Auto-reply</th><th>Msgs</th><th>Last seen</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -466,7 +484,7 @@ function render(state) {
   const ab = $("agt-table").querySelector("tbody");
   ab.innerHTML = "";
   if (state.agents.length === 0) {
-    ab.innerHTML = '<tr><td colspan="6" class="empty">No agents registered.</td></tr>';
+    ab.innerHTML = '<tr><td colspan="7" class="empty">No agents registered.</td></tr>';
   } else {
     for (const a of state.agents) {
       const tr = document.createElement("tr");
@@ -477,10 +495,18 @@ function render(state) {
       const action = a.alive
         ? '<button class="row-action danger" data-kill-pid="' + a.pid + '">Kill agent</button>'
         : '<button class="row-action danger" data-remove-id="' + a.id + '">Remove stale</button>';
+      const isOn = !!a.autonomous_reply;
+      const autoCell = a.alive
+        ? '<label class="auto-reply-cell" title="Toggle auto-reply for this agent">' +
+            '<input type="checkbox" data-autonomous-id="' + escapeHtml(a.id) + '"' + (isOn ? ' checked' : '') + ' />' +
+            '<span class="lbl' + (isOn ? ' on' : '') + '">' + (isOn ? 'on' : 'off') + '</span>' +
+          '</label>'
+        : '<span class="mono">' + (isOn ? 'on' : 'off') + '</span>';
       tr.innerHTML =
         '<td>' + escapeHtml(a.role) + (a.description ? '<div class="mono">' + escapeHtml(a.description) + '</div>' : "") + '</td>' +
         '<td class="mono">' + a.pid + '</td>' +
         '<td>' + status + '</td>' +
+        '<td>' + autoCell + '</td>' +
         '<td class="mono">' + msgs + '</td>' +
         '<td class="mono">' + fmtAgo(a.last_seen) + '</td>' +
         '<td>' + action + '</td>';
@@ -606,6 +632,22 @@ $("btn-quit").addEventListener("click", async () => {
   document.body.innerHTML = '<div style="padding:40px;text-align:center;color:#8a93a6;">UI stopped. You can close this tab.</div>';
 });
 
+document.addEventListener("change", async (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLInputElement)) return;
+  const autonomousId = t.getAttribute("data-autonomous-id");
+  if (!autonomousId) return;
+  const enabled = t.checked;
+  try {
+    await api("/api/agents/" + encodeURIComponent(autonomousId) + "/autonomous", "POST", { enabled });
+    toast("Auto-reply " + (enabled ? "enabled" : "disabled"));
+    refresh();
+  } catch (err) {
+    t.checked = !enabled;
+    toast(err.message, "error");
+  }
+});
+
 $("btn-retry-now")?.addEventListener("click", refresh);
 
 window.addEventListener("unhandledrejection", (e) => {
@@ -686,6 +728,26 @@ export function startUIServer(port = 7878): http.Server {
         const id = decodeURIComponent(p.slice("/api/remove-stale/".length));
         const ok = removeStaleAgent(id);
         return send(ok ? 200 : 404, { ok });
+      }
+      if (req.method === "POST" && p.startsWith("/api/agents/") && p.endsWith("/autonomous")) {
+        const inner = p.slice("/api/agents/".length, p.length - "/autonomous".length);
+        const agentId = decodeURIComponent(inner);
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            if (typeof parsed.enabled !== "boolean") {
+              return send(400, { error: "enabled must be boolean" });
+            }
+            const ok = setAutonomousReply(agentId, parsed.enabled);
+            send(ok ? 200 : 404, { ok, autonomous_reply: parsed.enabled ? 1 : 0 });
+          } catch (e: any) {
+            send(400, { error: e.message });
+          }
+        });
+        req.on("error", (e: any) => send(400, { error: e.message }));
+        return;
       }
       if (req.method === "POST" && p === "/api/quit-ui") {
         send(200, { ok: true });

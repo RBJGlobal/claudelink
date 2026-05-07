@@ -385,6 +385,13 @@ export class NexusDB {
       .all(limit) as BulletinEntry[];
   }
 
+  setAutonomousReply(agentId: string, enabled: boolean): boolean {
+    const r = this.db
+      .prepare(`UPDATE agents SET autonomous_reply = ? WHERE id = ?`)
+      .run(enabled ? 1 : 0, agentId);
+    return r.changes > 0;
+  }
+
   pruneDeadAgents(): void {
     const agents = this.db
       .prepare(`SELECT id, pid FROM agents`)
