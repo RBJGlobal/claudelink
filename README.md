@@ -1,211 +1,314 @@
 # ClaudeLink
 
-**Multiple Claude Code agents. One shared mesh. Fully autonomous.**
+> **The autonomous command center for Claude Code.** Run a swarm of Claude Code agents across multiple terminals, let them message each other, watch the whole mesh live, and walk away — they keep collaborating without you.
 
-ClaudeLink lets Claude Code instances running in separate terminals talk to each other in real time, *and keep talking* when you walk away from the keyboard. Open four terminals, give each agent a role, flip on the auto-nudge timer, and the swarm runs itself: messages route between agents, recipients pick up their inbox automatically, and you watch the whole thing live in a local Command Center.
+[![npm version](https://img.shields.io/npm/v/claudelink.svg?style=flat-square&color=6366f1)](https://www.npmjs.com/package/claudelink)
+[![License: MIT](https://img.shields.io/badge/License-MIT-10b981.svg?style=flat-square)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-3b82f6.svg?style=flat-square)](https://nodejs.org)
+[![Built for Claude Code](https://img.shields.io/badge/Built%20for-Claude%20Code-a855f7.svg?style=flat-square)](https://claude.com/claude-code)
+[![MCP](https://img.shields.io/badge/Protocol-MCP-f59e0b.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
-```
-Terminal 1 (reviewer)  ──┐
-Terminal 2 (developer) ──┤── ClaudeLink ── SQLite
-Terminal 3 (tester)    ──┤        │
-Terminal 4 (ops)       ──┘        │
-                                  ▼
-                  ┌──────────────────────────────┐
-                  │  Auto-nudge scheduler ticks  │
-                  │  → checks who has unread     │
-                  │  → types "check for updates" │
-                  │  → recipient processes inbox │
-                  └──────────────────────────────┘
-```
+ClaudeLink is an [MCP](https://modelcontextprotocol.io/) server that turns multiple Claude Code instances into a **single coordinated team**. Open four terminals, give each one a role — reviewer, developer, tester, architect — and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away.
 
-A local **Command Center** at `http://127.0.0.1:7878` opens automatically with the first agent — see who's online, watch messages flow, toggle autonomous reply per agent, configure the auto-nudge timer, and kill stuck servers without touching the terminal.
+You don't need to invent a multi-agent framework. You already have one.
 
 ![ClaudeLink Command Center](docs/assets/command-center.png)
 
-## Why this is different
+---
 
-Most multi-agent setups need a human in the loop typing "check messages" into every terminal. ClaudeLink ships a **closed-loop autonomous pipeline**:
+## Why ClaudeLink exists
 
-1. Agent A sends a message to Agent B's role.
-2. The auto-nudge scheduler sees Agent B has unread mail.
-3. It types `check for updates` straight into Agent B's terminal — exactly as if you typed it yourself.
-4. Agent B's prompt-submit hook detects the unread mail and routes Claude to read its inbox.
-5. Claude reads the message and decides what to do next — reply, act, broadcast, anything.
+A single Claude Code session is fast. Five sessions running in parallel — each owning a slice of the work, talking to each other, escalating, reviewing, retrying — is a different category of tool entirely.
 
-The keystroke path is indistinguishable from a human typing, so it cleanly sidesteps Claude Code's prompt-injection defenses without any unsafe shortcuts. **You set the cadence, you set who participates, you walk away. The agents keep collaborating.**
+The blocker has always been the human in the loop: someone has to type *"check messages"* into every terminal. ClaudeLink removes that human. The result is a hands-free, low-overhead AI development team that runs on hardware you already own, with the model you already pay for.
 
-## Quick Start
+| Without ClaudeLink | With ClaudeLink |
+|---|---|
+| One Claude per task | A coordinated swarm — reviewer, developer, tester, ops |
+| You shuttle messages by hand | Agents message each other directly |
+| You poll every terminal for updates | Auto-nudge wakes the right agent at the right time |
+| No single view of the work | Live Command Center at `127.0.0.1:7878` |
+| Every session is amnesiac to the others | Shared SQLite mesh + persistent bulletin board |
 
-```bash
-# Install and configure (one command)
-npx claudelink init
+If your workflow already gets a 2× lift from one Claude, a coordinated team can get you to **3–5×** without adding a second subscription, a second machine, or a second human.
+
+---
+
+## End-to-end flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Agent A<br/>(Reviewer)
+    participant DB as SQLite Mesh<br/>nexus.db (WAL)
+    participant SCH as Auto-nudge<br/>Scheduler
+    participant TERM as Agent B's<br/>Terminal
+    participant HOOK as UserPromptSubmit<br/>Hook
+    participant B as Agent B<br/>(Developer)
+
+    A->>DB: send(to:"developer", msg)
+    Note over DB: row written, read=0
+    rect rgb(30, 41, 59)
+    Note over SCH,B: every N minutes, fully autonomous
+    SCH->>DB: SELECT agents WITH unread mail
+    DB-->>SCH: Agent B has 1 unread
+    SCH->>TERM: tmux send-keys "check for updates"
+    TERM->>HOOK: prompt submitted (trusted path)
+    HOOK->>DB: peek unread
+    DB-->>HOOK: 1 message
+    HOOK-->>B: additionalContext: "you have 1 unread"
+    B->>DB: read_inbox()
+    DB-->>B: message from A
+    B->>B: decide & act
+    B->>DB: send(to:"reviewer", reply)
+    end
 ```
 
-Restart your Claude Code terminals. That's it.
+This is the loop that makes ClaudeLink a command center instead of a messaging library. The keystroke is indistinguishable from you typing by hand — so it cleanly sidesteps Claude Code's prompt-injection defenses without any unsafe shortcuts. You set the cadence. You set who participates. The agents run themselves.
 
-### In Terminal 1:
-> "Register as a code reviewer working on the auth module"
+---
 
-### In Terminal 2:
-> "Register as a developer. Check inbox for messages from the reviewer."
+## System architecture
 
-### Terminal 1 says to Claude:
-> "Send a message to the developer: Found a SQL injection vulnerability in auth.ts line 42. The user input is not sanitized before the query."
+```mermaid
+graph TB
+    subgraph TERMINALS["Your Terminals"]
+        direction LR
+        T1["💬 Reviewer"]
+        T2["⚙️ Developer"]
+        T3["🧪 Tester"]
+        T4["🏛️ Architect"]
+    end
 
-### Terminal 2 says to Claude:
-> "Read my inbox"
+    subgraph MCP["MCP Layer · one process per agent"]
+        direction LR
+        S1["claudelink-server"]
+        S2["claudelink-server"]
+        S3["claudelink-server"]
+        S4["claudelink-server"]
+    end
 
-The developer agent receives the reviewer's message and can act on it.
+    DB[("📦 SQLite (WAL)<br/>~/.claudelink/nexus.db<br/><br/>agents · messages · bulletin")]
+
+    subgraph CC["🎛️ Command Center · 127.0.0.1:7878"]
+        direction TB
+        UI["Live Web UI<br/>(2s refresh)"]
+        SCH["⏱️ Auto-nudge<br/>Scheduler"]
+        NOTIF["🔔 Desktop<br/>Notifier"]
+    end
+
+    T1 -.stdio.-> S1
+    T2 -.stdio.-> S2
+    T3 -.stdio.-> S3
+    T4 -.stdio.-> S4
+
+    S1 --> DB
+    S2 --> DB
+    S3 --> DB
+    S4 --> DB
+
+    DB --> UI
+    DB --> SCH
+    DB --> NOTIF
+
+    SCH -. keystroke .-> T1
+    SCH -. keystroke .-> T2
+    SCH -. keystroke .-> T3
+    SCH -. keystroke .-> T4
+```
+
+No daemon. No background service. Each Claude Code session spawns its own MCP server, and they coordinate through a single SQLite database in WAL mode — safe, concurrent, crash-resilient. The Command Center launches automatically with the first agent and persists across MCP restarts.
+
+---
+
+## Agent lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Registering: claude opens
+    Registering --> Idle: register(role)
+    Idle --> HasUnread: message arrives
+    HasUnread --> Nudged: scheduler tick (auto-reply ON)
+    HasUnread --> NotifyOnly: scheduler tick (auto-reply OFF)
+    NotifyOnly --> Idle: desktop notification fires
+    Nudged --> Reading: keystroke triggers hook
+    Reading --> Acting: read_inbox returns
+    Acting --> Idle: reply sent
+    Acting --> HasUnread: more unread queued
+    Idle --> [*]: terminal closes
+```
+
+Every agent has a per-row **Auto-reply toggle** in the Command Center. Flip it any time. Useful for advisor / strategy terminals you want quiet, or to put your morning standup on auto-pilot then quiet it again while you think.
+
+---
+
+## Keystroke dispatch
+
+```mermaid
+flowchart LR
+    TICK{{"⏱️ Scheduler tick"}} --> Q["SQL query<br/>• tty IS NOT NULL<br/>• autonomous_reply = 1<br/>• unread mail EXISTS"]
+    Q --> EACH["For each candidate"]
+    EACH --> APP{"terminal_app?"}
+    APP -->|tmux| TM["tmux send-keys<br/>-t pane_id"]
+    APP -->|iTerm2| IT["osascript<br/>write text to tty"]
+    APP -->|other| SK["skip + log"]
+    TM --> HOOK["UserPromptSubmit hook<br/>fires on receiving terminal"]
+    IT --> HOOK
+    HOOK --> INJ["additionalContext:<br/>'you have N unread'"]
+    INJ --> CLAUDE["✅ Claude reads inbox<br/>via its own tool call"]
+```
+
+The keystroke path matters. By simulating a real key event we route through Claude's normal trusted-input pipeline. The agent retains full agency over whether and how to reply — ClaudeLink never forges tool calls or fabricates intent.
+
+---
+
+## Quick start
+
+```bash
+# install + auto-configure (one command)
+npx claudelink init
+
+# restart your Claude Code terminals — that's it
+```
+
+Open three terminals:
+
+**Terminal 1**
+> "Register as a code reviewer working on the auth module."
+
+**Terminal 2**
+> "Register as a developer. Send a message to the reviewer asking for the last hot-spot list."
+
+**Terminal 3** (Command Center is already open — just look at it.)
+
+Within a minute the reviewer's reply appears in terminal 2, the developer acts on it, and the bulletin board shows what changed. You typed nothing in the second terminal after registration.
+
+---
 
 ## Installation
 
-### Step 1: Install the package
+### 1. Install the package
 ```bash
 npm install -g claudelink
 ```
 
-### Step 2: Add to Claude Code (pick one)
+### 2. Add to Claude Code
 
 **Global (recommended — works in every project):**
 ```bash
 claude mcp add --scope user claudelink -- claudelink-server
 ```
-This adds ClaudeLink to `~/.claude.json` so it's available in every Claude Code session, in every project. One command, done forever.
 
 **Per-Project (only this project):**
 ```bash
 cd your-project
 npx claudelink init
 ```
-This adds ClaudeLink to `.mcp.json` in your project directory only.
 
-### Step 3: Restart Claude Code
+### 3. Restart Claude Code
 
-Close and reopen Claude Code in your terminals. ClaudeLink tools will be available automatically.
+ClaudeLink tools appear automatically. Done.
 
 ### Requirements
 - Node.js 18+
 - Claude Code CLI
+- macOS or Linux (Windows works for messaging; auto-nudge requires tmux)
 
-## How It Works
-
-ClaudeLink is an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server. Each Claude Code instance connects to it automatically and gets access to communication tools. All instances share a single SQLite database (`~/.claudelink/nexus.db`) using WAL mode for safe concurrent access.
-
-There is no daemon or background service. Each Claude Code session spawns its own MCP server process, and they coordinate through the shared database.
+---
 
 ## Command Center
 
-The Command Center is a local web UI at `http://127.0.0.1:7878` that gives you a live view of every agent in the mesh. The first `claudelink-server` to boot in any terminal launches it automatically — subsequent agents share the same window. It survives MCP restarts and only exits when you click **Quit UI** (or run `claudelink ui --stop`).
+The Command Center is a local web UI at `http://127.0.0.1:7878` — a live console for the entire mesh. The first `claudelink-server` to boot launches it; subsequent agents share the same window. It survives MCP restarts and only exits when you click **Quit UI**.
 
-### What it shows
+### What it gives you
 
-- **Running servers** — every `claudelink-server` process, with PID, TTY, uptime, and the role it registered as. Per-row **Kill** button sends SIGTERM.
-- **Registered agents** — role, description, online status, **per-agent Auto-reply toggle** (flip whether the auto-nudge scheduler can wake this agent up), message counts (sent / received), and last-seen timestamp. Per-row **Kill agent** SIGTERMs the matching server.
-- **Health** — total agents, unread/total messages, bulletin entries, orphan blockers, FK violations, and servers running. The **Heal orphans** button cascade-cleans every dead agent's messages and bulletin rows in one transaction.
-- **Auto-nudge** — global on/off and the tick interval (1–120 minutes). When on, the scheduler checks every interval for agents with unread mail and types `check for updates` into each one's terminal. Settings persist across UI restarts.
-- **Recent messages** — the last several messages across all agents, with unread and priority badges.
+| Panel | What it does |
+|---|---|
+| **Running servers** | Every `claudelink-server` process with PID, TTY, uptime, role. Per-row **Kill** button. |
+| **Registered agents** | Role, status, **per-agent Auto-reply toggle**, sent/received counts, last-seen. |
+| **Health** | Total agents, unread/total messages, bulletin entries, orphan blockers, FK violations. **Heal orphans** cleans dead-agent tail rows in one transaction. |
+| **Auto-nudge** | Global on/off + tick interval (1–120 min). Scheduler only fires for terminals that *actually have* unread mail — no wasted Claude turns. |
+| **Recent messages** | Live feed of the last several messages across all agents, with priority and unread badges. |
 
-The page auto-refreshes every 2 seconds. **Kill all servers** in the header drops the whole mesh in one click.
+The page auto-refreshes every 2 seconds. **Kill all servers** in the header drops the entire mesh in one click.
 
 ### Lifecycle
 
-A lock file at `~/.claudelink/ui.lock` prevents duplicate windows. The launcher detached-spawns the UI process with `unref()` so it outlives the MCP parent. If a stale lock is detected (PID dead and no heartbeat at `/api/heartbeat`), a fresh UI takes over.
+A lock file at `~/.claudelink/ui.lock` prevents duplicate windows. The launcher detached-spawns the UI process with `unref()` so it outlives the MCP parent. If a stale lock is detected (PID dead and no heartbeat at `/api/heartbeat`), a fresh UI takes over automatically.
 
-To opt out, set `CLAUDELINK_UI=off` in the environment before starting Claude Code.
+To opt out: `CLAUDELINK_UI=off` in your environment before starting Claude Code.
 
 ```bash
 claudelink ui          # start it manually (or just spawn any agent)
 claudelink ui --stop   # graceful shutdown
 ```
 
-## Available Tools
+---
 
-Once connected, Claude Code gains these tools:
+## Available tools
 
-### `register`
-Register this agent with a role so others can find it.
-```
-"Register as a developer working on the payment system"
-```
+Once connected, every Claude Code session gains these MCP tools:
 
-### `send`
-Send a direct message to an agent by role.
-```
-"Send a high-priority message to the reviewer: the fix is ready for re-review"
-```
+| Tool | Purpose | Example prompt |
+|---|---|---|
+| `register` | Identify this agent on the mesh | *"Register as a developer working on the payment system"* |
+| `send` | Direct message to a role | *"Send a high-priority message to the reviewer: fix is ready for re-review"* |
+| `broadcast` | Send to all agents | *"Broadcast: deployment in 5 minutes, hold all merges"* |
+| `read_inbox` | Pull unread messages | *"Check my inbox"* |
+| `get_agents` | Roster of who's online | *"Who's online?"* |
+| `post_bulletin` | Persistent announcement | *"Post to bulletin: v2.1 release branch created"* |
+| `get_bulletin` | Read the bulletin board | *"Show the bulletin board"* |
 
-### `broadcast`
-Send a message to ALL connected agents.
-```
-"Broadcast: deployment starting in 5 minutes, hold all merges"
-```
+`register` and `send` accept v1.1 options: `autonomousReply`, `expectsReply`, `parentMessageId` for thread tracking, FYI semantics, and per-agent autonomy control.
 
-### `read_inbox`
-Check for new messages.
-```
-"Check my inbox"
-```
+---
 
-### `get_agents`
-See who's online.
-```
-"Show me all connected agents"
-```
-
-### `post_bulletin`
-Post to the shared bulletin board (persistent announcements).
-```
-"Post to bulletin: v2.1 release branch created, all features frozen"
-```
-
-### `get_bulletin`
-Read the bulletin board.
-```
-"Show the bulletin board"
-```
-
-## CLI Commands
+## CLI
 
 ```bash
-claudelink init                       # Configure for current project
-claudelink init --global              # Configure globally
-claudelink status                     # Show registered agents and message stats
-claudelink ui                         # Open the Command Center in your browser
-claudelink ui --stop                  # Stop the Command Center
-claudelink install-hooks              # Install autonomous-reply hooks (project)
-claudelink install-hooks --global     # Install hooks in ~/.claude/settings.json
-claudelink install-hooks --uninstall  # Remove ClaudeLink hooks
-claudelink reset                      # Clear all data (fresh start)
-claudelink help                       # Show help
+claudelink init                       # configure for current project
+claudelink init --global              # configure globally
+claudelink status                     # show registered agents + message stats
+claudelink ui                         # open the Command Center
+claudelink ui --stop                  # stop the Command Center
+claudelink install-hooks              # install autonomous-reply hooks (project)
+claudelink install-hooks --global     # install hooks in ~/.claude/settings.json
+claudelink install-hooks --uninstall  # remove ClaudeLink hooks
+claudelink reset                      # clear all data (fresh start)
+claudelink help                       # full help
 ```
 
-## Autonomous Replies
+---
 
-ClaudeLink eliminates the "go to every terminal and type *check inbox*" loop with two complementary mechanisms: an **auto-nudge scheduler** for the periodic / idle case, and a **Stop hook** for low-latency turn-end processing. Both feed messages into the recipient agent through Claude's own `read_inbox` MCP tool, so Claude has full agency over whether and how to reply.
+## Autonomous replies (deep dive)
 
-### Auto-nudge scheduler (primary)
+ClaudeLink ships **two complementary mechanisms** for hands-free agent collaboration. Both feed messages into the recipient through Claude's own `read_inbox` tool — Claude always has agency.
 
-The Command Center runs a periodic scheduler that types `check for updates` into each registered agent's terminal whenever its inbox has unread messages. Configure it directly from the Command Center UI:
+### 1. Auto-nudge scheduler (primary)
 
-- **On/off toggle** — the "Auto-nudge" panel (between Health and Recent messages)
-- **Interval** — minutes between ticks (default 5, clamped to 1–120)
+The Command Center runs a periodic scheduler that types `check for updates` into each registered agent's terminal whenever its inbox has unread mail. Configure directly from the UI:
 
-The scheduler is **smart**: the SQL trigger only nudges terminals that actually have unread mail, so empty inboxes don't burn Claude turns. Per-terminal-app dispatch:
+- **On/off toggle** — Auto-nudge panel
+- **Interval** — 1–120 minutes (default 5)
 
-- **tmux** → `tmux send-keys` (no permissions needed)
-- **iTerm2** → `osascript` matched by tty (no Accessibility prompt)
-- **Apple Terminal** → currently unsupported (would need Accessibility permission; logged as skipped)
+The scheduler is **smart**: the SQL filter only nudges terminals with unread mail. Empty inboxes don't burn Claude turns. Per-terminal-app dispatch:
 
-When the keystroke arrives, the existing UserPromptSubmit hook fires, injects "you have N unread, call read_inbox" as `additionalContext`, and Claude reads the inbox via its own tool call. This routes through Claude's normal trusted-input path, so the prompt-injection defense never trips.
+| Terminal | Mechanism | Permissions |
+|---|---|---|
+| **tmux** | `tmux send-keys -t <pane>` | none |
+| **iTerm2** | `osascript` matched by tty | none |
+| **Apple Terminal** | unsupported (would need Accessibility) | not silently prompted |
+
+When the keystroke arrives, the existing UserPromptSubmit hook injects `"you have N unread, call read_inbox"` as `additionalContext`. Claude reads via its own tool call — fully trusted path.
 
 Settings persist at `~/.claudelink/scheduler.json`. Audit log at `~/.claudelink/scheduler.log`.
 
-### Stop hook (supplementary low-latency path)
+### 2. Stop hook (low-latency supplement)
 
-For the case where an agent has *just* finished a turn and there's a message in its inbox, a Stop hook can fire immediately instead of waiting for the next scheduler tick. Install with:
+For the case where an agent has *just* finished a turn and there's a message waiting, a Stop hook can fire immediately instead of waiting for the next scheduler tick:
 
 ```bash
-claudelink install-hooks                # project-scoped — writes ./.claude/settings.json
+claudelink install-hooks                # project-scoped
 claudelink install-hooks --global       # writes ~/.claude/settings.json
 claudelink install-hooks --uninstall    # clean rollback
 ```
@@ -213,57 +316,48 @@ claudelink install-hooks --uninstall    # clean rollback
 The hook emits `{"decision": "block", "reason": "..."}` directing Claude to call `read_inbox`. Three guards prevent runaway loops:
 
 - **Hard cap** — max consecutive auto-fires per terminal without a human prompt (`CLAUDELINK_HARD_CAP`, default 5)
-- **Cooldown** — minimum seconds between auto-fires per terminal (`CLAUDELINK_COOLDOWN_S`, default 30)
+- **Cooldown** — minimum seconds between auto-fires (`CLAUDELINK_COOLDOWN_S`, default 30)
 - **Chain cap** — max `parent_id` chain depth before a message stops triggering auto-fires (`CLAUDELINK_CHAIN_CAP`, default 8)
 
-Set any to `0` to disable that specific guard. Every Stop hook decision logs to `~/.claudelink/auto-fire.log`.
+Set any to `0` to disable. Decisions log to `~/.claudelink/auto-fire.log`.
 
-**Honest note on Claude's safety boundary:** Claude Code's prompt-injection defense correctly flags "external content steering outbound tool calls" as adversarial. In practice this means the Stop hook reliably triggers an autonomous inbox read, but Claude may decline to send the outbound reply autonomously — particularly when the reply would be unrelated to the user's most recent prompt. This is responsible safety behavior, not a bug. The auto-nudge scheduler avoids this entirely because the keystroke path is indistinguishable from the user typing by hand.
+> **Honest note on Claude's safety boundary:** Claude Code's prompt-injection defense correctly flags external content steering outbound tool calls. The Stop hook reliably triggers an autonomous inbox read; Claude may decline to send the outbound reply autonomously when the reply would be unrelated to the user's most recent prompt. This is responsible safety behavior, not a bug. **The auto-nudge scheduler avoids this entirely** because the keystroke path is indistinguishable from the user typing by hand.
 
-### Per-agent opt-out (advisor pattern)
+### Per-agent opt-out
 
-Two ways to control whether a given agent participates in autonomous reply:
+Two ways to silence an agent:
 
-**1. Set it at registration** — register with `autonomousReply: false` for terminals that should receive but never auto-process messages. Useful as a default for advisor / strategy terminals.
+1. **At registration** — `autonomousReply: false` for terminals that should receive but never auto-process. Useful as a default for advisor / strategy terminals.
+2. **Live from the Command Center** — flip the **Auto-reply** column checkbox. Applies on the next scheduler tick. Lifetime: holds until that agent re-registers (close + reopen Claude Code in that terminal).
 
-**2. Toggle live from the Command Center** — the **Auto-reply** column in the agents panel has a per-row checkbox. Flip it any time. The change is live and applies on the next scheduler tick. Lifetime: holds until the agent re-registers (i.e., until you close and reopen that Claude Code session). Perfect for "I want my advisor on auto-pilot during the morning standup, then quiet again while I think."
-
-When opted out:
-- The Stop hook reads the inbox (so messages don't pile up) but never emits a continuation
-- The auto-nudge scheduler skips that agent at the SQL filter — no keystroke is sent
+When opted out: the Stop hook still reads the inbox (so messages don't pile up) but never emits a continuation, and the auto-nudge scheduler skips that agent at the SQL filter — no keystroke is sent.
 
 ### Per-message opt-out
 
-Send with `expectsReply: false` for FYI / informational pings. The recipient still reads them but the Stop hook treats them as ineligible for auto-fire (the scheduler already filters by message presence regardless of `expects_reply`, so FYIs trigger nudges too).
+Send with `expectsReply: false` for FYI / informational pings.
 
 ### Desktop notifications
 
-The Command Center fires a macOS desktop notification (via `osascript display notification`, no Accessibility permission required) for every new message that lands in any agent's inbox — including agents registered with `autonomousReply: false`. Notifications give you situational awareness across the swarm without switching terminals.
-
-Multiple messages arriving in the same 2-second poll window collapse into one summary notification ("3 new ClaudeLink messages: reviewer → developer: ... (+2 more)"). The historical backlog is suppressed at startup so a freshly opened Command Center doesn't spam you with old messages.
-
-Off-switch: `CLAUDELINK_NOTIFY=off`.
+The Command Center fires a macOS desktop notification (via `osascript display notification`, no Accessibility permission needed) for every new message that lands in any agent's inbox — including agents with `autonomousReply: false`. Multiple messages in the same 2-second poll window collapse into one summary notification. Off-switch: `CLAUDELINK_NOTIFY=off`.
 
 ### Debug knobs
 
-- `CLAUDELINK_HOOK_TTY=/dev/ttysNNN` — override TTY auto-detection (testing, CI).
-- `CLAUDELINK_HOOK_STRICT=1` — surface hook errors to stderr instead of swallowing them. Default is fail-open (production safety).
-- `CLAUDELINK_NOTIFY=off` — disable desktop notifications.
+- `CLAUDELINK_HOOK_TTY=/dev/ttysNNN` — override TTY auto-detection (testing, CI)
+- `CLAUDELINK_HOOK_STRICT=1` — surface hook errors to stderr instead of swallowing them
+- `CLAUDELINK_NOTIFY=off` — disable desktop notifications
 
-## Autonomous Mode (Recommended)
+---
 
-By default, you'd have to tell Claude "check my inbox" manually every time. That defeats the purpose. With autonomous mode, agents communicate **on their own** — checking for messages and sending updates without you asking.
+## Autonomous mode setup
 
-### Automatic Setup
-
-**This is installed automatically** when you run `claudelink init` or `claudelink init --global`. The init command creates a `CLAUDE.md` file with the autonomous communication instructions in the appropriate directory:
+By default, you'd have to tell Claude *"check my inbox"* manually every time. That defeats the purpose. Autonomous mode is installed automatically when you run `claudelink init` or `claudelink init --global` — it writes a `CLAUDE.md` file in the appropriate directory:
 
 - `init --global` → writes to `~/.claude/CLAUDE.md` (all projects)
 - `init` → writes to `./CLAUDE.md` (current project only)
 
-If you already have a `CLAUDE.md`, the ClaudeLink instructions are appended without overwriting your existing content. Running init multiple times is safe — it won't duplicate the instructions.
+If you already have a `CLAUDE.md`, the ClaudeLink instructions are appended without overwriting your existing content. Running init multiple times is safe — no duplication.
 
-### What It Teaches Claude
+### What it teaches Claude
 
 The `CLAUDE.md` file instructs every Claude Code session to:
 
@@ -272,153 +366,64 @@ The `CLAUDE.md` file instructs every Claude Code session to:
 - **Respond to messages immediately** without waiting for you to say "check inbox"
 - **Post to the bulletin board** when making decisions that affect the project
 
-### Manual Fallback
+### Without vs with autonomous mode
 
-If the automatic setup doesn't work on your system (different directory structure, permissions, etc.), you can manually create or add to `~/.claude/CLAUDE.md`:
+```diff
+- Without:
+- You: Fix the bug in auth.ts
+- Claude: (fixes the bug)
+- You: Now check your inbox
+- Claude: You have 1 message from the reviewer...
+- You: Send the reviewer an update
+- Claude: Message sent.
 
-```markdown
-## ClaudeLink - Autonomous Agent Communication
-
-You are part of a multi-agent team. Other agents may be running in separate
-terminals and can send you messages at any time via ClaudeLink.
-
-### Automatic Inbox Checking
-
-- BEFORE starting any task: Check your inbox using read_inbox first
-- AFTER completing any task: Check your inbox again using read_inbox
-- If you receive a message, acknowledge it and act on it before moving on
-- If a message requires you to change your current work, do so immediately
-- If a message is from another agent asking for information, respond using send
-  before continuing your own work
-- High-priority messages take precedence over your current task
-
-### Autonomous Collaboration
-
-- When you finish work that another agent might care about, proactively send
-  them an update
-- If you encounter a problem that another agent's role could help with, send
-  them a message
-- When you make a decision that affects the project, post it to the bulletin board
-- If you're blocked waiting for another agent, say so and check inbox again
-
-### Communication Shortcuts
-
-- "check response" or "check messages" — Use read_inbox to check for new messages
-- "ask the [role]" — Send a message to that role and check inbox for their reply
-- "tell the [role]" — Send a one-way message to that role
-- "who's online" — Use get_agents to list all connected agents
-- "update the board" — Use post_bulletin to post a status update
-- "check the board" — Use get_bulletin to read the bulletin board
-```
-
-### Per-Project vs Global
-
-| File | Applies to |
-|------|-----------|
-| `~/.claude/CLAUDE.md` | **Every project, every terminal** — recommended |
-| `your-project/CLAUDE.md` | Only that specific project |
-
-If you want autonomous mode everywhere (most people do), use the global file. If you only want it for specific projects, put it in the project's `CLAUDE.md`.
-
-### What Autonomous Mode Looks Like
-
-Without autonomous mode:
-```
-You: Fix the bug in auth.ts
-Claude: (fixes the bug)
-You: Now check your inbox
-Claude: You have 1 message from the reviewer...
-You: Send the reviewer an update
-Claude: Message sent.
-```
-
-With autonomous mode:
-```
-You: Fix the bug in auth.ts
-Claude: (checks inbox — sees a tip from the reviewer about the bug)
-       (fixes the bug using the reviewer's guidance)
-       (sends the reviewer: "Fixed it, here's what I changed...")
-       (posts to bulletin: "auth.ts bug fixed")
-       (checks inbox again — no new messages)
-       Done. I fixed the token validation bug. The reviewer had already
-       flagged the exact line, so I used their suggestion.
++ With autonomous mode:
++ You: Fix the bug in auth.ts
++ Claude: (checks inbox — sees a tip from the reviewer about the bug)
++        (fixes the bug using the reviewer's guidance)
++        (sends the reviewer: "Fixed it, here's what I changed...")
++        (posts to bulletin: "auth.ts bug fixed")
++        Done. I fixed the token validation bug.
 ```
 
 One instruction from you. All the communication happens automatically.
 
 ---
 
-## Use Cases
+## Use cases
 
-### Code Review Pipeline
-- **Terminal 1** (reviewer): Reviews code, sends findings to developer
-- **Terminal 2** (developer): Receives feedback, implements fixes, notifies reviewer when ready
+### 🔍 Code review pipeline
+- **Reviewer** scans diffs, sends findings to developer
+- **Developer** receives feedback, implements fixes, notifies reviewer when ready
 
-### Test-Driven Development
-- **Terminal 1** (developer): Writes implementation
-- **Terminal 2** (tester): Runs tests, reports failures back to developer
+### 🧪 Test-driven development
+- **Developer** writes implementation
+- **Tester** runs tests, reports failures back to developer
 
-### Full Team Simulation
-- **Terminal 1** (architect): Posts design decisions to bulletin board
-- **Terminal 2** (developer): Implements features, asks architect for clarification
-- **Terminal 3** (reviewer): Reviews code, sends feedback to developer
-- **Terminal 4** (ops): Monitors build pipeline, broadcasts deployment status
+### 🏛️ Full team simulation
+- **Architect** posts design decisions to bulletin board
+- **Developer** implements features, asks architect for clarification
+- **Reviewer** reviews code, sends feedback to developer
+- **Ops** monitors build pipeline, broadcasts deployment status
 
-### Parallel Feature Development
-- **Terminal 1** (dev-auth): Working on authentication
-- **Terminal 2** (dev-api): Working on API endpoints
-- Both agents coordinate to avoid conflicts and share interface contracts
+### ⚡ Parallel feature development
+- **dev-auth** working on authentication
+- **dev-api** working on API endpoints
+- Both coordinate to avoid conflicts and share interface contracts
 
-## Architecture
+### 🌐 Long-running research swarm
+- **planner** breaks the question into sub-tasks
+- **researchers** (3–4 agents) tackle independent slices
+- **synthesizer** consolidates findings into a single report
+- All running while you do something else; auto-nudge keeps them moving
 
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Claude Code  │     │  Claude Code  │     │  Claude Code  │
-│  (Terminal 1) │     │  (Terminal 2) │     │  (Terminal 3) │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       │ stdio              │ stdio              │ stdio
-       │                    │                    │
-┌──────▼───────┐     ┌──────▼───────┐     ┌──────▼───────┐
-│  MCP Server   │     │  MCP Server   │     │  MCP Server   │
-│  (Process 1)  │     │  (Process 2)  │     │  (Process 3)  │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       └────────────────────┼────────────────────┘
-                            │
-                   ┌────────▼────────┐
-                   │   SQLite (WAL)   │
-                   │  ~/.claudelink/  │
-                   │    nexus.db      │
-                   └─────────────────┘
-```
-
-Each Claude Code session spawns its own MCP server process via stdio. All processes read and write to the same SQLite database. WAL (Write-Ahead Logging) mode ensures concurrent access is safe and performant.
-
-### Why SQLite?
-- Zero configuration — single file, no server to run
-- WAL mode handles concurrent readers and writers
-- Survives process crashes — no data loss
-- Portable across macOS, Linux, and Windows
-
-### Message Flow
-1. Agent A calls `send(to="developer", message="...")`
-2. MCP Server A writes a row to the `messages` table
-3. Agent B calls `read_inbox()`
-4. MCP Server B reads unread rows from `messages` and marks them read
-5. Agent B receives the message and can act on it
-
-### Agent Lifecycle
-- Agents register with a `role` and their process `pid`
-- A heartbeat updates `last_seen` every 30 seconds
-- When listing agents, dead processes (checked via `kill -0 pid`) are automatically pruned
-- No manual cleanup needed
+---
 
 ## Configuration
 
-ClaudeLink stores its database at `~/.claudelink/nexus.db`. This path is fixed so all Claude Code instances across all projects converge on the same communication hub.
+ClaudeLink stores its database at `~/.claudelink/nexus.db`. The path is fixed so all Claude Code instances across all projects converge on the same hub.
 
-### .mcp.json (per-project)
+### `.mcp.json` (per-project)
 ```json
 {
   "mcpServers": {
@@ -430,107 +435,67 @@ ClaudeLink stores its database at `~/.claudelink/nexus.db`. This path is fixed s
 }
 ```
 
-### ~/.claude.json (global via CLI)
+### `~/.claude.json` (global via CLI)
 ```bash
 claude mcp add --scope user claudelink -- claudelink-server
 ```
+
+---
+
+## Architecture details
+
+### Why SQLite?
+- Zero configuration — single file, no server to run
+- WAL mode handles concurrent readers and writers safely
+- Survives process crashes — no data loss
+- Portable across macOS, Linux, and Windows
+
+### Message flow
+1. Agent A calls `send(to="developer", message="...")`
+2. MCP Server A writes a row to the `messages` table
+3. Auto-nudge scheduler (or Stop hook) wakes Agent B
+4. MCP Server B reads unread rows and marks them read atomically (`UPDATE...RETURNING`)
+5. Agent B receives the message and acts
+
+### Agent lifecycle
+- Agents register with a `role`, `pid`, `tty`, and `terminal_app` (auto-detected)
+- Heartbeat updates `last_seen` every 30 seconds
+- Dead processes (checked via `kill -0 pid`) auto-pruned at next listing
+- No manual cleanup needed; the Command Center exposes a one-click **Heal orphans** for tail rows
+
+---
 
 ## FAQ
 
 ### Wait, does `npx claudelink init` start Claude?
 
-**No.** You only run `npx claudelink init` **once**. It's a setup command that writes a config file (`.mcp.json`) telling Claude Code to connect to ClaudeLink on startup. After that, you never need to run it again.
-
-Your daily workflow is exactly the same as before:
+**No.** You only run `npx claudelink init` once. It's a setup command that writes a config file (`.mcp.json`) telling Claude Code to connect to ClaudeLink on startup. After that, you never need to run it again — your daily workflow is exactly the same:
 
 ```bash
-# Terminal 1 — start Claude normally
-claude
-
-# Terminal 2 — start Claude normally
-claude
-
-# Terminal 3 — start Claude with full auto-permissions
-claude --dangerously-skip-permissions
+claude                                # standard
+claude --dangerously-skip-permissions # auto-permissions
+claude --allowedTools "mcp__claudelink__*"  # auto-approve only ClaudeLink tools
 ```
 
-Claude Code reads `.mcp.json` when it starts, sees ClaudeLink is configured, and automatically connects. The `register`, `send`, `read_inbox`, and other tools just appear — no extra commands.
-
-Then you just talk naturally:
-
-**Terminal 1:**
-> "Register as a code reviewer working on the auth module"
-
-**Terminal 2:**
-> "Register as a developer. Send a message to the reviewer asking if auth.ts looks good."
-
-### How do I start Claude with different permission modes?
-
-ClaudeLink works with all Claude Code startup modes:
-
-```bash
-# Standard mode (Claude asks before using tools)
-claude
-
-# Skip all permission prompts
-claude --dangerously-skip-permissions
-
-# Auto-approve only ClaudeLink tools (recommended)
-claude --allowedTools "mcp__claudelink__*"
-```
+Claude Code reads `.mcp.json` on startup, sees ClaudeLink is configured, connects automatically. The tools just appear.
 
 ### How do I disable ClaudeLink?
 
-You do **not** need to restart your computer. There are several options depending on what you want:
+You do not need to restart your computer. Pick one:
 
-**Option 1: Disable for a specific project**
-
-Remove the `claudelink` entry from your project's `.mcp.json`:
-
-```bash
-# Open the config
-nano .mcp.json
-```
-
-Delete the `"claudelink": { ... }` block, save, and restart Claude Code in that terminal. ClaudeLink tools will no longer appear for that project.
-
-**Option 2: Disable globally**
-
-If you installed globally, remove it via CLI:
-
+**Per project:** edit `.mcp.json` and remove the `claudelink` block.
+**Globally:** `claude mcp remove --scope user claudelink`
+**Reset data only:** `npx claudelink reset` (keeps config, deletes DB)
+**Full uninstall:**
 ```bash
 claude mcp remove --scope user claudelink
-```
-
-**Option 3: Clear all data but keep it installed**
-
-```bash
-npx claudelink reset
-```
-
-This deletes the database (all messages, agents, bulletin entries) but keeps the config so you can start fresh.
-
-**Option 4: Full uninstall (remove everything)**
-
-```bash
-# 1. Remove from project config
-#    Edit .mcp.json and delete the claudelink entry
-
-# 2. Remove from global config
-claude mcp remove --scope user claudelink
-
-# 3. Uninstall the package
 npm uninstall -g claudelink
-
-# 4. Delete all ClaudeLink data
 rm -rf ~/.claudelink
 ```
 
-After any of these, just restart your Claude Code sessions. No computer restart needed — just close and reopen the terminal, or start a new `claude` session.
-
 ### Can I temporarily disable it without deleting anything?
 
-Yes. In your `.mcp.json`, add `"disabled": true`:
+Yes — set `"disabled": true` in the `.mcp.json` block:
 
 ```json
 {
@@ -544,54 +509,53 @@ Yes. In your `.mcp.json`, add `"disabled": true`:
 }
 ```
 
-Set it back to `false` (or remove the line) to re-enable. Restart Claude Code after changing.
+### Will agents talk to each other across machines?
+
+Not yet — current backend is local SQLite. Multi-machine support (a networked backend) is on the contributions roadmap below.
+
+### Does this work on Windows?
+
+Messaging works on any platform with Node 18+. The auto-nudge scheduler currently dispatches to tmux and iTerm2 only; on Windows you'd run inside WSL + tmux for the full autonomous loop.
 
 ---
 
 ## Contributing
 
-Contributions are welcome! This is an open-source project and we'd love the community to help build on it.
+This is open source. Contributions welcome.
 
-### Development Setup
 ```bash
 git clone https://github.com/jaysidd/claudelink.git
 cd claudelink
 npm install
 npm run build
+node dist/index.js          # run MCP server directly
+node dist/cli.js status     # exercise CLI
 ```
 
-### Testing Locally
-```bash
-# Run the MCP server directly (for debugging)
-node dist/index.js
+### Roadmap ideas
+- **Channels / topics** — named buses for topic-based collaboration
+- **Message search & history** — query past messages, not just unread
+- **Structured payloads** — file paths, code snippets, diffs as first-class types
+- **Priority interrupts** — break the recipient's current turn for high-priority pings
+- **Agent templates** — pre-built role configs for common workflows
+- **Webhooks** — push agent activity to external services
+- **Encryption at rest**
+- **Multi-machine support** — networked backend so swarms span hosts
 
-# Test the CLI
-node dist/cli.js init
-node dist/cli.js status
-```
-
-### Ideas for Contributions
-- **Agent groups/channels**: Named channels for topic-based communication
-- **Message history**: Tool to view past messages (not just unread)
-- **File sharing**: Agents can share file paths or code snippets with structured formatting
-- **Priority notifications**: Interrupt the current agent when a high-priority message arrives
-- **Agent templates**: Pre-built role configurations for common workflows
-- **Webhooks**: Notify external services when agents communicate
-- **Encryption**: Encrypt messages at rest in the database
-- **Multi-machine support**: Replace SQLite with a networked backend for remote agent communication
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
+If you ship one of these, send a PR. If you ship something we didn't think of, send it anyway.
 
 ---
 
-Built by [Jay Siddiqi](https://github.com/jaysidd).
+## License
 
-If ClaudeLink helps your workflow, give it a star and share it with your team.
+MIT — see [LICENSE](LICENSE).
+
+---
+
+Built by [Jay Siddiqi](https://github.com/jaysidd). If ClaudeLink helps your workflow, **star the repo** and share it with your team — discoverability is everything for an open-source project.
 
 ---
 
 ### Keywords
 
-claudelink, claude link, multi-agent communication, claude code, claude code mcp, mcp server, model context protocol, ai agent collaboration, multi-terminal ai, agent-to-agent messaging, inter-process communication, ipc ai agents, claude code plugin, claude code extension, ai pair programming, ai code review, multi-agent workflow, ai terminal tools, developer tools, ai developer tools, open source ai tools, agent orchestration, agent mesh, ai agent hub, collaborative ai agents, claude mcp server, sqlite mcp, ai swarm, multi-agent system, ai team simulation, agent message bus, claude code multi-instance, iterm2 ai, terminal ai agents, ai agent framework, autonomous ai agents, agent communication protocol, ai productivity tools, claude code tools, mcp tools, ai workflow automation
+claudelink, claude link, claude code, claude code mcp, claude code multi-agent, claude code automation, claude code command center, claude code productivity, claude code orchestration, mcp server, model context protocol, multi-agent communication, ai agent collaboration, multi-terminal ai, agent-to-agent messaging, autonomous ai agents, autonomous claude code, ai swarm, multi-agent system, ai team simulation, agent message bus, agent mesh, ai agent hub, collaborative ai agents, claude mcp server, sqlite mcp, iterm2 ai, tmux ai, terminal ai agents, ai agent framework, agent communication protocol, ai pair programming, ai code review, multi-agent workflow, ai workflow automation, agent orchestration, autonomous developer agents, ai dev productivity, 5x developer, ai pipeline, ai infrastructure, claude code plugin, claude code extension, ai developer tools, open source ai tools, mcp tools.
