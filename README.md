@@ -1,6 +1,6 @@
 # ClaudeLink
 
-> **The autonomous command center for AI coding agents.** Run a swarm of Claude Code, Codex CLI, Gemini CLI, and Goose agents across multiple terminals, let them message each other, watch the whole mesh live, and walk away — they keep collaborating without you. **No cloud. No telemetry. No account.** It all runs on your machine.
+> **The autonomous command center for AI coding agents — any model, any provider.** Run a swarm of Claude Code, Codex CLI, Gemini CLI, and Goose agents across multiple terminals, with the underlying LLM chosen freely from **hundreds of models** spanning Anthropic, OpenAI, Google, xAI, Mistral, OpenRouter, Ollama (local), Bedrock, Vertex AI, and more. They message each other, you watch the whole mesh live, and they keep collaborating when you walk away. **No cloud. No telemetry. No account.** It all runs on your machine.
 
 [![npm version](https://img.shields.io/npm/v/claudelink.svg?style=flat-square&color=6366f1)](https://www.npmjs.com/package/claudelink)
 [![License: MIT](https://img.shields.io/badge/License-MIT-10b981.svg?style=flat-square)](LICENSE)
@@ -9,7 +9,9 @@
 [![MCP](https://img.shields.io/badge/Protocol-MCP-f59e0b.svg?style=flat-square)](https://modelcontextprotocol.io/)
 [![Local-first](https://img.shields.io/badge/Local--First-no%20cloud-22c55e.svg?style=flat-square)](#local-first-security)
 
-ClaudeLink is an open-source [MCP](https://modelcontextprotocol.io/) server that turns multiple AI coding agents — Claude Code, OpenAI Codex CLI, Google Gemini CLI, Block's Goose, or any MCP-compatible client — into a **single coordinated team**. Open four terminals, give each one a role, and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away. **Mix models freely**: a Claude reviewer talking to a Codex developer talking to a Gemini tester is a fully supported pattern.
+ClaudeLink is an open-source [MCP](https://modelcontextprotocol.io/) server that turns multiple AI coding agents — Claude Code, OpenAI Codex CLI, Google Gemini CLI, Block's Goose, or any MCP-compatible client — into a **single coordinated team**. Open four terminals, give each one a role, and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away.
+
+**The name says "Claude" but ClaudeLink is model-agnostic.** Each CLI you plug in chooses its own backing model — and through Goose alone you can wire any of **25+ LLM providers**, putting hundreds of models within reach of the same mesh. A Claude reviewer talking to a Codex developer talking to a Gemini tester talking to a Llama-via-Ollama deep-thinker is a fully supported pattern. The mesh doesn't care; the LLM is somebody else's problem.
 
 You don't need to invent a multi-agent framework. You already have one.
 
@@ -40,12 +42,12 @@ If one agent already gives you a 2× lift, a coordinated heterogeneous team can 
 
 ClaudeLink works with any MCP-compatible coding CLI. Today, four are first-class with one-command install:
 
-| CLI | Vendor | Install | Instructions file |
+| CLI | Vendor | Models it can run | Install |
 |---|---|---|---|
-| **[Claude Code](https://claude.com/claude-code)** | Anthropic | `claudelink init --claude --global` | `~/.claude/CLAUDE.md` |
-| **[Codex CLI](https://developers.openai.com/codex/cli)** | OpenAI | `claudelink init --codex --global` | `~/.codex/AGENTS.md` |
-| **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** | Google | `claudelink init --gemini --global` | `~/.gemini/GEMINI.md` |
-| **[Goose](https://github.com/aaif-goose/goose)** | Block / AAIF | `claudelink init --goose --global` | `~/.config/goose/.goosehints` |
+| **[Claude Code](https://claude.com/claude-code)** | Anthropic | Claude (Opus, Sonnet, Haiku) | `claudelink init --claude --global` |
+| **[Codex CLI](https://developers.openai.com/codex/cli)** | OpenAI | GPT-5 family, GPT-4-class | `claudelink init --codex --global` |
+| **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** | Google | Gemini 2.5 Pro / Flash family | `claudelink init --gemini --global` |
+| **[Goose](https://github.com/aaif-goose/goose)** | Block / AAIF | **25+ providers** — any model behind any of them (see below) | `claudelink init --goose --global` |
 
 Or set up all four in one shot:
 
@@ -53,9 +55,21 @@ Or set up all four in one shot:
 claudelink init --all --global
 ```
 
-Beyond these, **any MCP-compatible client can join the mesh** — point its MCP config at `claudelink-server` and add a copy of the multi-agent instructions to its project-instructions file. Roll your own client config? Open a PR with the install path and we'll add a flag.
+### Model reach (especially through Goose)
 
-> **What's the catch?** The auto-nudge layer that types `check for updates` into a terminal needs the CLI to be running in iTerm2 or tmux on macOS / Linux. Apple Terminal isn't supported (Accessibility permission requirement we don't want to silently ask for). MCP messaging itself works regardless of terminal.
+A single Goose terminal in your mesh can speak to whatever provider you point it at. That's a lot of models — from a single mesh:
+
+- **Frontier providers**: Anthropic Claude, OpenAI GPT, Google Gemini, xAI Grok, Mistral
+- **Cloud platforms**: AWS Bedrock, GCP Vertex AI, Azure OpenAI, Databricks, Snowflake
+- **Aggregators**: [OpenRouter](https://openrouter.ai/) — hundreds of models from one API key
+- **Local / offline**: [Ollama](https://ollama.com/), Ramalama, Docker Model Runner — thousands of open-weight model variants running on your hardware
+- **Inference-only**: Groq for blazing-fast token rates
+
+This means **ClaudeLink isn't really "Claude" anymore** — it's the coordination plane, and the model space below it is essentially open. Want a Llama-3 reviewer running locally via Ollama, a Claude Sonnet implementer for hard reasoning, and a Groq-powered Llama for fast scaffolding? Spin up three Goose terminals (or a Goose + a Claude Code + a Codex), hand each one its role, and they share the same SQLite mesh. Pick the model for the job, on a per-agent basis, with no ClaudeLink-side configuration.
+
+> **What's the catch?** The auto-nudge layer that types `check for updates` into a terminal needs the CLI to be running in iTerm2 or tmux on macOS / Linux. Apple Terminal isn't supported (Accessibility permission we don't want to silently ask for). MCP messaging itself works regardless of terminal.
+
+Beyond the four flagged CLIs, **any MCP-compatible client can join** — point its MCP config at `claudelink-server`, add a copy of the multi-agent instructions to its project-instructions file. Roll your own and want a `--<your-cli>` flag? Open a PR with the install path; it's roughly an hour of work to add one.
 
 ---
 
