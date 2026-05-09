@@ -247,11 +247,14 @@ function killAllServers(): { killed: number[]; failed: { pid: number; reason: st
   return { killed, failed };
 }
 
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ClaudeLink"><rect width="64" height="64" rx="12" fill="#0f1115"/><rect x="18" y="8" width="14" height="48" rx="4" fill="#b89cff"/><rect x="18" y="42" width="30" height="14" rx="4" fill="#b89cff"/><circle cx="49" cy="49" r="7" fill="#3ddc84"/></svg>`;
+
 const HTML = String.raw`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <title>ClaudeLink Command Center</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <style>
   :root {
     --bg: #0f1115;
@@ -706,6 +709,10 @@ export function startUIServer(port = 7878): http.Server {
 
       if (req.method === "GET" && (p === "/" || p === "/index.html")) {
         return send(200, HTML, "text/html; charset=utf-8");
+      }
+      if (req.method === "GET" && p === "/favicon.svg") {
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return send(200, FAVICON_SVG, "image/svg+xml; charset=utf-8");
       }
       if (req.method === "GET" && p === "/api/heartbeat") {
         return send(200, { ok: true, pid: process.pid });
