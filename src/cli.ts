@@ -47,7 +47,7 @@ const CLAUDE_MD_MARKER = "## ClaudeLink - Autonomous Agent Communication";
 const AGENTS_MD_CONTENT = `
 ## ClaudeLink - Multi-Agent Coordination
 
-You are part of a multi-agent team. Other agents (Codex CLI, Claude Code, Gemini CLI, or other MCP-compatible clients) may be running in separate terminals — and possibly on other machines on the local network — and can send you messages at any time via ClaudeLink.
+You are part of a multi-agent team. Other agents (Codex CLI, Claude Code, Gemini CLI, Goose, or other MCP-compatible clients) may be running in separate terminals — and possibly on other machines on the local network — and can send you messages at any time via ClaudeLink.
 
 ### Inbox discipline
 
@@ -76,7 +76,7 @@ You are part of a multi-agent team. Other agents (Codex CLI, Claude Code, Gemini
 
 const AGENTS_MD_MARKER = "## ClaudeLink - Multi-Agent Coordination";
 
-type Client = "claude" | "codex" | "gemini";
+type Client = "claude" | "codex" | "gemini" | "goose";
 
 function installClaudeMd(scope: "global" | "project") {
   let claudeMdPath: string;
@@ -232,6 +232,86 @@ function addGeminiMcp(scope: "global" | "project"): boolean {
   return true;
 }
 
+function installGooseHints(scope: "global" | "project") {
+  let hintsPath: string;
+
+  if (scope === "global") {
+    const gooseConfigDir = path.join(os.homedir(), ".config", "goose");
+    if (!fs.existsSync(gooseConfigDir)) {
+      fs.mkdirSync(gooseConfigDir, { recursive: true });
+    }
+    hintsPath = path.join(gooseConfigDir, ".goosehints");
+  } else {
+    hintsPath = path.join(process.cwd(), ".goosehints");
+  }
+
+  if (fs.existsSync(hintsPath)) {
+    const existing = fs.readFileSync(hintsPath, "utf-8");
+    if (existing.includes(AGENTS_MD_MARKER)) {
+      console.log(`  .goosehints already has ClaudeLink instructions (${hintsPath})`);
+      return;
+    }
+    const separator = existing.endsWith("\n") ? "\n" : "\n\n";
+    fs.writeFileSync(hintsPath, existing + separator + AGENTS_MD_CONTENT + "\n");
+    console.log(`  Added ClaudeLink instructions to existing ${hintsPath}`);
+  } else {
+    fs.writeFileSync(hintsPath, AGENTS_MD_CONTENT + "\n");
+    console.log(`  Created ${hintsPath} with ClaudeLink instructions`);
+  }
+}
+
+const GOOSE_EXTENSION_BLOCK = `extensions:
+  claudelink:
+    name: ClaudeLink
+    cmd: claudelink-server
+    args: []
+    enabled: true
+    type: stdio
+    timeout: 300
+`;
+
+function addGooseMcp(_scope: "global" | "project"): boolean {
+  // Goose uses a global config file at ~/.config/goose/config.yaml.
+  // Project-level extensions are not supported by Goose, so scope is ignored.
+  const gooseConfigDir = path.join(os.homedir(), ".config", "goose");
+  const configPath = path.join(gooseConfigDir, "config.yaml");
+
+  if (!fs.existsSync(configPath)) {
+    if (!fs.existsSync(gooseConfigDir)) {
+      fs.mkdirSync(gooseConfigDir, { recursive: true });
+    }
+    fs.writeFileSync(configPath, GOOSE_EXTENSION_BLOCK);
+    console.log(`  Created ${configPath} with claudelink extension`);
+    return true;
+  }
+
+  const existing = fs.readFileSync(configPath, "utf-8");
+  if (existing.includes("claudelink:") && existing.includes("claudelink-server")) {
+    console.log(`  ${configPath} already has claudelink extension`);
+    return true;
+  }
+
+  // File exists but no claudelink extension. Don't risk corrupting valid YAML
+  // without a parser — print the snippet for the user to paste safely.
+  console.log(`
+  ${configPath} already exists. To add ClaudeLink, paste this under your
+  existing 'extensions:' section (or at the top of the file if there isn't
+  one yet):
+
+    claudelink:
+      name: ClaudeLink
+      cmd: claudelink-server
+      args: []
+      enabled: true
+      type: stdio
+      timeout: 300
+
+  Or run \`goose configure\` and select Add Extension > Command-line Extension
+  with name "claudelink" and command "claudelink-server".
+    `);
+  return false;
+}
+
 function printBanner() {
   console.log(`
     ╔═══════════════════════════════════════════╗
@@ -286,6 +366,11 @@ function initProject(clients: Client[]) {
     installGeminiMd("project");
   }
 
+  if (clients.includes("goose")) {
+    addGooseMcp("project");
+    installGooseHints("project");
+  }
+
   const lines: string[] = ["", "  ClaudeLink is ready!", "", "  What was set up:"];
   if (clients.includes("claude")) {
     lines.push("    - .mcp.json: MCP server config for Claude Code");
@@ -299,6 +384,10 @@ function initProject(clients: Client[]) {
     lines.push("    - .gemini/settings.json: MCP server config for Gemini CLI");
     lines.push("    - GEMINI.md: multi-agent instructions for Gemini CLI");
   }
+  if (clients.includes("goose")) {
+    lines.push("    - ~/.config/goose/config.yaml: Goose extension (or snippet printed above)");
+    lines.push("    - .goosehints: multi-agent instructions for Goose");
+  }
   lines.push("");
   lines.push("  Next steps:");
   if (clients.includes("claude")) {
@@ -309,6 +398,9 @@ function initProject(clients: Client[]) {
   }
   if (clients.includes("gemini")) {
     lines.push("    - Restart Gemini CLI in your terminals; it will pick up GEMINI.md and the MCP server");
+  }
+  if (clients.includes("goose")) {
+    lines.push("    - Restart Goose in your terminals; it will load the claudelink extension");
   }
   lines.push("");
   lines.push(`  Data stored in: ${NEXUS_DIR}/nexus.db`);
@@ -355,6 +447,12 @@ function initGlobal(clients: Client[]) {
     installGeminiMd("global");
   }
 
+  let gooseMcpOk = false;
+  if (clients.includes("goose")) {
+    gooseMcpOk = addGooseMcp("global");
+    installGooseHints("global");
+  }
+
   const lines: string[] = ["", "  ClaudeLink is ready (global install)!", "", "  What was set up:"];
   if (clients.includes("claude")) {
     lines.push(`    - Claude Code MCP: ${claudeMcpOk ? "registered globally" : "manual step printed above"}`);
@@ -367,6 +465,10 @@ function initGlobal(clients: Client[]) {
   if (clients.includes("gemini")) {
     lines.push(`    - Gemini CLI MCP: ${geminiMcpOk ? "registered globally in ~/.gemini/settings.json" : "manual step printed above"}`);
     lines.push("    - ~/.gemini/GEMINI.md: multi-agent instructions");
+  }
+  if (clients.includes("goose")) {
+    lines.push(`    - Goose extension: ${gooseMcpOk ? "registered globally in ~/.config/goose/config.yaml" : "manual step printed above"}`);
+    lines.push("    - ~/.config/goose/.goosehints: multi-agent instructions");
   }
   lines.push("");
   lines.push(`  Data stored in: ${NEXUS_DIR}/nexus.db`);
@@ -385,14 +487,15 @@ function showHelp() {
     --claude                   Claude Code (.mcp.json + CLAUDE.md)
     --codex                    OpenAI Codex CLI (~/.codex/config.toml + AGENTS.md)
     --gemini                   Google Gemini CLI (~/.gemini/settings.json + GEMINI.md)
+    --goose                    Block Goose (~/.config/goose/config.yaml + .goosehints)
     --both                     Shortcut for --claude --codex
-    --all                      Shortcut for --claude --codex --gemini
+    --all                      Shortcut for all four supported clients
 
   Examples:
     claudelink init                       Claude Code in current project
     claudelink init --gemini              Gemini CLI in current project
     claudelink init --codex --gemini      Codex + Gemini in current project
-    claudelink init --all --global        All three clients, globally
+    claudelink init --all --global        All four clients, globally
 
     status                     Show registered agents and their status
     ui                         Launch the Command Center UI in your browser
@@ -668,10 +771,11 @@ switch (command) {
     const wantClaude = args.includes("--claude");
     const wantCodex = args.includes("--codex");
     const wantGemini = args.includes("--gemini");
+    const wantGoose = args.includes("--goose");
 
     let clients: Client[];
     if (wantAll) {
-      clients = ["claude", "codex", "gemini"];
+      clients = ["claude", "codex", "gemini", "goose"];
     } else if (wantBoth) {
       clients = ["claude", "codex"];
     } else {
@@ -679,6 +783,7 @@ switch (command) {
         wantClaude ? "claude" : null,
         wantCodex ? "codex" : null,
         wantGemini ? "gemini" : null,
+        wantGoose ? "goose" : null,
       ].filter(Boolean) as Client[];
       clients = explicit.length > 0 ? explicit : ["claude"];
     }

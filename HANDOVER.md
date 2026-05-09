@@ -6,14 +6,15 @@
 
 ---
 
-## Current status: v1.3 multi-model now spans Claude/Codex/Gemini; v1.2 multi-machine design approved (Phase 0); v1.1.2 npm publish still pending OTP
+## Current status: v1.3 multi-model spans Claude/Codex/Gemini/Goose; README rewritten around model-agnostic positioning; v1.2 multi-machine design approved (Phase 0); v1.1.2 npm publish still pending OTP
 
 **Open items in priority order:**
 
-1. **v1.3 multi-model (Claude + Codex + Gemini).** Codex CLI piece committed `68b4325`, pushed. Gemini CLI piece staged, about to commit. Codex CLI agent registration verified live on the user's machine. Gemini CLI smoke test pending (user has gemini 0.41.2 installed, global setup applied to `~/.gemini/settings.json` + `~/.gemini/GEMINI.md`).
-2. **v1.2 multi-machine design approved.** Full design doc at `docs/multi-machine-design.md`, committed `d4bb0ee` and pushed. Phase 0 sign-off complete. Phase 1 build cleared to start when the user has the M5 set up.
-3. **Favicon shipped.** Bold lavender L with mint node-cap dot. Commit `8ad9812`, pushed.
-4. **v1.1.2 npm publish.** Still pending interactive 2FA OTP. Only blocks the npmjs.com README; tag + GitHub release are live. When the user does the publish dance, bump to `v1.3.0` first to capture the multi-model work in the same release.
+1. **v1.3 multi-model (4 CLIs supported).** Claude Code, Codex CLI, Gemini CLI, Goose all have `--<cli>` flags + `--all` shortcut + `--global` flow. Smoke-tested live on user's machine: Claude Code (working since v1.0), Codex CLI verified registered + sending/receiving, Gemini CLI registered (10-15s first-token latency observed but Gemini-side, not ours). Goose code paths smoke-tested in temp dirs only — user has Goose installed?? not verified. Snapshot of commits below.
+2. **README rewrite.** Major reframing pass: lead positioning now model-agnostic, new "Compatible AI clients" section with table, new "Heterogeneous workflows" section, new "Local-first security" subsection, MCP-config-files-per-CLI table in Configuration, FAQ updated to mention v1.2 multi-machine design and how to add an arbitrary MCP-compatible CLI. Keywords block expanded for SEO across all four CLIs.
+3. **v1.2 multi-machine design approved.** Full design doc at `docs/multi-machine-design.md`, committed `d4bb0ee` and pushed. Phase 0 sign-off complete. Phase 1 build cleared to start when the user has the M5 set up.
+4. **Favicon shipped.** Bold lavender L with mint node-cap dot. Commit `8ad9812`, pushed.
+5. **v1.1.2 npm publish.** Still pending interactive 2FA OTP. When the user does the publish dance, bump to `v1.3.0` (new minor — multi-model is the headline feature) and publish in one shot. Includes README rewrite + Codex/Gemini/Goose support + favicon + multi-machine design doc.
 
 ## What was added on 2026-05-08
 

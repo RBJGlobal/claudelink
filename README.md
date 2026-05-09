@@ -1,14 +1,15 @@
 # ClaudeLink
 
-> **The autonomous command center for Claude Code.** Run a swarm of Claude Code agents across multiple terminals, let them message each other, watch the whole mesh live, and walk away — they keep collaborating without you.
+> **The autonomous command center for AI coding agents.** Run a swarm of Claude Code, Codex CLI, Gemini CLI, and Goose agents across multiple terminals, let them message each other, watch the whole mesh live, and walk away — they keep collaborating without you. **No cloud. No telemetry. No account.** It all runs on your machine.
 
 [![npm version](https://img.shields.io/npm/v/claudelink.svg?style=flat-square&color=6366f1)](https://www.npmjs.com/package/claudelink)
 [![License: MIT](https://img.shields.io/badge/License-MIT-10b981.svg?style=flat-square)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-3b82f6.svg?style=flat-square)](https://nodejs.org)
-[![Built for Claude Code](https://img.shields.io/badge/Built%20for-Claude%20Code-a855f7.svg?style=flat-square)](https://claude.com/claude-code)
+[![Multi-CLI](https://img.shields.io/badge/CLIs-Claude%20%7C%20Codex%20%7C%20Gemini%20%7C%20Goose-a855f7.svg?style=flat-square)](#compatible-ai-clients)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-f59e0b.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![Local-first](https://img.shields.io/badge/Local--First-no%20cloud-22c55e.svg?style=flat-square)](#local-first-security)
 
-ClaudeLink is an [MCP](https://modelcontextprotocol.io/) server that turns multiple AI coding agents (Claude Code, OpenAI Codex CLI, Google Gemini CLI, or any MCP-compatible client) into a **single coordinated team**. Open four terminals, give each one a role — reviewer, developer, tester, architect — and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away. Mix models freely: a Claude reviewer talking to a Codex developer talking to a Gemini tester is a fully supported pattern.
+ClaudeLink is an open-source [MCP](https://modelcontextprotocol.io/) server that turns multiple AI coding agents — Claude Code, OpenAI Codex CLI, Google Gemini CLI, Block's Goose, or any MCP-compatible client — into a **single coordinated team**. Open four terminals, give each one a role, and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away. **Mix models freely**: a Claude reviewer talking to a Codex developer talking to a Gemini tester is a fully supported pattern.
 
 You don't need to invent a multi-agent framework. You already have one.
 
@@ -18,19 +19,58 @@ You don't need to invent a multi-agent framework. You already have one.
 
 ## Why ClaudeLink exists
 
-A single Claude Code session is fast. Five sessions running in parallel — each owning a slice of the work, talking to each other, escalating, reviewing, retrying — is a different category of tool entirely.
+A single AI coding agent is fast. Five agents running in parallel — each owning a slice of the work, talking to each other, escalating, reviewing, retrying — is a different category of tool entirely.
 
-The blocker has always been the human in the loop: someone has to type *"check messages"* into every terminal. ClaudeLink removes that human. The result is a hands-free, low-overhead AI development team that runs on hardware you already own, with the model you already pay for.
+The blocker has always been the human in the loop: someone has to type *"check messages"* into every terminal. ClaudeLink removes that human. The result is a hands-free, low-overhead AI development team that runs on hardware you already own, with the agentic CLIs you already pay for.
 
 | Without ClaudeLink | With ClaudeLink |
 |---|---|
-| One Claude per task | A coordinated swarm — reviewer, developer, tester, ops |
+| One agent per task | A coordinated swarm — reviewer, developer, tester, ops |
+| One model per task | Mix Claude, Codex, Gemini, Goose freely on the same mesh |
 | You shuttle messages by hand | Agents message each other directly |
 | You poll every terminal for updates | Auto-nudge wakes the right agent at the right time |
 | No single view of the work | Live Command Center at `127.0.0.1:7878` |
 | Every session is amnesiac to the others | Shared SQLite mesh + persistent bulletin board |
 
-If your workflow already gets a 2× lift from one Claude, a coordinated team can get you to **3–5×** without adding a second subscription, a second machine, or a second human.
+If one agent already gives you a 2× lift, a coordinated heterogeneous team can get you to **3–5×** without adding a second subscription you don't already own, a second machine, or a second human.
+
+---
+
+## Compatible AI clients
+
+ClaudeLink works with any MCP-compatible coding CLI. Today, four are first-class with one-command install:
+
+| CLI | Vendor | Install | Instructions file |
+|---|---|---|---|
+| **[Claude Code](https://claude.com/claude-code)** | Anthropic | `claudelink init --claude --global` | `~/.claude/CLAUDE.md` |
+| **[Codex CLI](https://developers.openai.com/codex/cli)** | OpenAI | `claudelink init --codex --global` | `~/.codex/AGENTS.md` |
+| **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** | Google | `claudelink init --gemini --global` | `~/.gemini/GEMINI.md` |
+| **[Goose](https://github.com/aaif-goose/goose)** | Block / AAIF | `claudelink init --goose --global` | `~/.config/goose/.goosehints` |
+
+Or set up all four in one shot:
+
+```bash
+claudelink init --all --global
+```
+
+Beyond these, **any MCP-compatible client can join the mesh** — point its MCP config at `claudelink-server` and add a copy of the multi-agent instructions to its project-instructions file. Roll your own client config? Open a PR with the install path and we'll add a flag.
+
+> **What's the catch?** The auto-nudge layer that types `check for updates` into a terminal needs the CLI to be running in iTerm2 or tmux on macOS / Linux. Apple Terminal isn't supported (Accessibility permission requirement we don't want to silently ask for). MCP messaging itself works regardless of terminal.
+
+---
+
+## Heterogeneous workflows
+
+Why mix models? Because each one is good at different things, and ClaudeLink lets you put each on the task it shines at.
+
+| Pattern | Recipe |
+|---|---|
+| **Reviewer + Developer + Tester** | Claude advises, Codex implements, Gemini stress-tests. The advisor catches what the implementer rationalizes; the tester catches what both miss. |
+| **Cost-optimized swarm** | Use a faster, cheaper agent for boilerplate (Codex, Goose), reserve the bigger model (Claude Opus, Gemini 2.5) for the few terminals doing hard reasoning. |
+| **Cross-checker** | Run two implementations of the same feature on two different agents, then have a third agent diff their outputs and flag inconsistencies. |
+| **Audit / discovery** | Goose for system inspection, Claude for narrative summary, Codex for surfacing edge cases. They post their findings to the bulletin board and you read one consolidated thread. |
+
+The Command Center shows them all as peers in the same mesh — agent role, sent/received counts, last-seen, auto-reply state. It doesn't matter which CLI is on the other end of an MCP connection.
 
 ---
 
@@ -64,7 +104,7 @@ sequenceDiagram
     end
 ```
 
-This is the loop that makes ClaudeLink a command center instead of a messaging library. The keystroke is indistinguishable from you typing by hand — so it cleanly sidesteps Claude Code's prompt-injection defenses without any unsafe shortcuts. You set the cadence. You set who participates. The agents run themselves.
+This is the loop that makes ClaudeLink a command center instead of a messaging library. The keystroke is indistinguishable from you typing by hand — so it cleanly sidesteps the prompt-injection defenses that Claude Code (and other safety-conscious CLIs) ship with, without any unsafe shortcuts. You set the cadence. You set who participates. The agents run themselves.
 
 ---
 
@@ -117,7 +157,7 @@ graph TB
     SCH -. keystroke .-> T4
 ```
 
-No daemon. No background service. Each Claude Code session spawns its own MCP server, and they coordinate through a single SQLite database in WAL mode — safe, concurrent, crash-resilient. The Command Center launches automatically with the first agent and persists across MCP restarts.
+No daemon. No background service. Each agent session (Claude Code, Codex, Gemini, Goose) spawns its own short-lived `claudelink-server` MCP process, and they coordinate through a single SQLite database in WAL mode — safe, concurrent, crash-resilient. The Command Center launches automatically with the first agent and persists across MCP restarts.
 
 ---
 
@@ -155,33 +195,34 @@ flowchart LR
     TM --> HOOK["UserPromptSubmit hook<br/>fires on receiving terminal"]
     IT --> HOOK
     HOOK --> INJ["additionalContext:<br/>'you have N unread'"]
-    INJ --> CLAUDE["✅ Claude reads inbox<br/>via its own tool call"]
+    INJ --> CLAUDE["✅ Agent reads inbox<br/>via its own tool call"]
 ```
 
-The keystroke path matters. By simulating a real key event we route through Claude's normal trusted-input pipeline. The agent retains full agency over whether and how to reply — ClaudeLink never forges tool calls or fabricates intent.
+The keystroke path matters. By simulating a real key event we route through the agent's normal trusted-input pipeline. The agent retains full agency over whether and how to reply — ClaudeLink never forges tool calls or fabricates intent. This is *why* it works for Codex, Gemini, and Goose without modification: the keystroke is a primitive every CLI handles identically.
 
 ---
 
 ## Quick start
 
 ```bash
-# install + auto-configure (one command)
-npx claudelink init
+# install + auto-configure all four supported CLIs globally
+npx claudelink init --all --global
 
-# restart your Claude Code terminals — that's it
+# restart your terminals — that's it
 ```
 
-Open three terminals:
+Open three terminals — mix CLIs however you like:
 
-**Terminal 1**
+**Terminal 1** (Claude Code, advisor)
 > "Register as a code reviewer working on the auth module."
 
-**Terminal 2**
-> "Register as a developer. Send a message to the reviewer asking for the last hot-spot list."
+**Terminal 2** (Codex CLI, implementer)
+> "Register me as a developer. Send a message to the reviewer asking for the last hot-spot list."
 
-**Terminal 3** (Command Center is already open — just look at it.)
+**Terminal 3** (Gemini CLI, validator) — or just leave the Command Center open.
+> "Register me as a tester. Watch for completed work and run validation passes."
 
-Within a minute the reviewer's reply appears in terminal 2, the developer acts on it, and the bulletin board shows what changed. You typed nothing in the second terminal after registration.
+Within a minute the reviewer's reply lands in terminal 2, the developer acts on it, and the bulletin board shows what changed. You typed nothing in the second or third terminal after registration. The Command Center at `http://127.0.0.1:7878` shows all three peers in real time, regardless of which model is on the other end of each.
 
 ---
 
@@ -211,9 +252,15 @@ claudelink init --gemini --global
 # Merges mcpServers.claudelink into ~/.gemini/settings.json + writes ~/.gemini/GEMINI.md
 ```
 
+**Goose (global):**
+```bash
+claudelink init --goose --global
+# Adds the claudelink extension to ~/.config/goose/config.yaml + writes ~/.config/goose/.goosehints
+```
+
 **Everything at once (global):**
 ```bash
-claudelink init --all --global   # Claude + Codex + Gemini, three clients on one mesh
+claudelink init --all --global   # Claude + Codex + Gemini + Goose on one mesh
 ```
 
 **Per-project (mix and match):**
@@ -222,8 +269,9 @@ cd your-project
 npx claudelink init                       # Claude Code (.mcp.json + CLAUDE.md)
 npx claudelink init --codex               # Codex CLI (AGENTS.md + TOML snippet)
 npx claudelink init --gemini              # Gemini CLI (.gemini/settings.json + GEMINI.md)
+npx claudelink init --goose               # Goose (.goosehints + config snippet)
 npx claudelink init --codex --gemini      # stack flags additively
-npx claudelink init --all                 # all three clients in one project
+npx claudelink init --all                 # all four clients in one project
 ```
 
 ### 3. Restart your terminals
@@ -232,11 +280,24 @@ ClaudeLink tools appear automatically. Done.
 
 ### Multi-model support
 
-ClaudeLink doesn't care which model is on the other end of an MCP connection. The MCP layer is open — any compliant client can register and participate. A Claude advisor can message a Codex developer can message a Gemini tester, and the Command Center shows them all as peers on the same mesh. The only Claude-Code-specific layer is the optional Stop hook (which gives instant turn-end pickup); Codex and Gemini agents fall back to the auto-nudge scheduler's keystroke cadence, which is fine for almost every workflow.
+ClaudeLink doesn't care which model is on the other end of an MCP connection. The MCP layer is open — any compliant client can register and participate. A Claude advisor can message a Codex developer can message a Gemini tester, and the Command Center shows them all as peers on the same mesh. The only Claude-Code-specific layer is the optional Stop hook (which gives instant turn-end pickup); Codex, Gemini, and Goose agents fall back to the auto-nudge scheduler's keystroke cadence, which is fine for almost every workflow.
+
+### Local-first security
+
+ClaudeLink is built to disappear into your dev environment, not become another SaaS dashboard you have to trust:
+
+- **No cloud, no servers.** Every byte of state lives in `~/.claudelink/nexus.db` on your machine.
+- **No telemetry, no analytics, no phone-home.** Read the source — there's nothing to opt out of because nothing is sent.
+- **No account, no signup, no API key.** ClaudeLink doesn't talk to any external service. The agents talk to their own LLM providers however they normally would; ClaudeLink is just the connective tissue between *them*.
+- **Loopback by default.** The Command Center binds to `127.0.0.1:7878`. It's not reachable from outside your machine unless you explicitly opt in (planned for the v1.2 multi-machine release with bearer-token auth on a LAN bind).
+- **Fully open source.** MIT licensed. Every line of code is in this repo. Code is auditable, forkable, and you can run a custom build for your enterprise's compliance posture.
+- **Sandboxed terminal interaction.** The auto-nudge scheduler types into iTerm2 / tmux through their public AppleScript / send-keys APIs — the same way a Bash script would. No accessibility shims, no kernel hooks, no permission prompts.
+
+If you've been hesitant to wire AI agents together because every "multi-agent framework" wants you to send your context to their cloud, ClaudeLink is built for you. Your code stays where it is.
 
 ### Requirements
 - Node.js 18+
-- An MCP-compatible client: Claude Code CLI, OpenAI Codex CLI, or Google Gemini CLI
+- One or more MCP-compatible clients: Claude Code, OpenAI Codex CLI, Google Gemini CLI, or Block's Goose
 - macOS or Linux (Windows works for messaging; auto-nudge requires tmux)
 
 ---
@@ -261,7 +322,7 @@ The page auto-refreshes every 2 seconds. **Kill all servers** in the header drop
 
 A lock file at `~/.claudelink/ui.lock` prevents duplicate windows. The launcher detached-spawns the UI process with `unref()` so it outlives the MCP parent. If a stale lock is detected (PID dead and no heartbeat at `/api/heartbeat`), a fresh UI takes over automatically.
 
-To opt out: `CLAUDELINK_UI=off` in your environment before starting Claude Code.
+To opt out: `CLAUDELINK_UI=off` in your environment before starting any agent CLI.
 
 ```bash
 claudelink ui          # start it manually (or just spawn any agent)
@@ -272,7 +333,7 @@ claudelink ui --stop   # graceful shutdown
 
 ## Available tools
 
-Once connected, every Claude Code session gains these MCP tools:
+Once connected, every agent session — Claude Code, Codex CLI, Gemini CLI, Goose, or any other MCP client — gains these MCP tools:
 
 | Tool | Purpose | Example prompt |
 |---|---|---|
@@ -307,16 +368,16 @@ claudelink help                       # full help
 
 ## Autonomous replies (deep dive)
 
-ClaudeLink ships **two complementary mechanisms** for hands-free agent collaboration. Both feed messages into the recipient through Claude's own `read_inbox` tool — Claude always has agency.
+ClaudeLink ships **two complementary mechanisms** for hands-free agent collaboration. Both feed messages into the recipient through that agent's own `read_inbox` tool — the agent always has agency.
 
-### 1. Auto-nudge scheduler (primary)
+### 1. Auto-nudge scheduler (primary, works for every CLI)
 
 The Command Center runs a periodic scheduler that types `check for updates` into each registered agent's terminal whenever its inbox has unread mail. Configure directly from the UI:
 
 - **On/off toggle** — Auto-nudge panel
 - **Interval** — 1–120 minutes (default 5)
 
-The scheduler is **smart**: the SQL filter only nudges terminals with unread mail. Empty inboxes don't burn Claude turns. Per-terminal-app dispatch:
+The scheduler is **smart**: the SQL filter only nudges terminals with unread mail. Empty inboxes don't burn agent turns or tokens. Per-terminal-app dispatch:
 
 | Terminal | Mechanism | Permissions |
 |---|---|---|
@@ -324,13 +385,13 @@ The scheduler is **smart**: the SQL filter only nudges terminals with unread mai
 | **iTerm2** | `osascript` matched by tty | none |
 | **Apple Terminal** | unsupported (would need Accessibility) | not silently prompted |
 
-When the keystroke arrives, the existing UserPromptSubmit hook injects `"you have N unread, call read_inbox"` as `additionalContext`. Claude reads via its own tool call — fully trusted path.
+When the keystroke arrives, the receiving CLI treats it as normal user input and the agent calls `read_inbox` via its own tool — fully trusted path. **This works identically for Claude Code, Codex CLI, Gemini CLI, and Goose** because the keystroke is the lowest common denominator every terminal app handles the same.
 
 Settings persist at `~/.claudelink/scheduler.json`. Audit log at `~/.claudelink/scheduler.log`.
 
-### 2. Stop hook (low-latency supplement)
+### 2. Stop hook (Claude-Code-only low-latency supplement)
 
-For the case where an agent has *just* finished a turn and there's a message waiting, a Stop hook can fire immediately instead of waiting for the next scheduler tick:
+For Claude Code agents specifically, when an agent has *just* finished a turn and there's a message waiting, a Stop hook can fire immediately instead of waiting for the next scheduler tick:
 
 ```bash
 claudelink install-hooks                # project-scoped
@@ -338,7 +399,9 @@ claudelink install-hooks --global       # writes ~/.claude/settings.json
 claudelink install-hooks --uninstall    # clean rollback
 ```
 
-The hook emits `{"decision": "block", "reason": "..."}` directing Claude to call `read_inbox`. Three guards prevent runaway loops:
+> The Stop hook is Claude-Code-specific (Claude Code's hooks contract). Codex CLI, Gemini CLI, and Goose agents fall back to the auto-nudge scheduler's keystroke cadence — which is fine for almost every workflow.
+
+The hook emits `{"decision": "block", "reason": "..."}` directing the Claude agent to call `read_inbox`. Three guards prevent runaway loops:
 
 - **Hard cap** — max consecutive auto-fires per terminal without a human prompt (`CLAUDELINK_HARD_CAP`, default 5)
 - **Cooldown** — minimum seconds between auto-fires (`CLAUDELINK_COOLDOWN_S`, default 30)
@@ -353,7 +416,7 @@ Set any to `0` to disable. Decisions log to `~/.claudelink/auto-fire.log`.
 Two ways to silence an agent:
 
 1. **At registration** — `autonomousReply: false` for terminals that should receive but never auto-process. Useful as a default for advisor / strategy terminals.
-2. **Live from the Command Center** — flip the **Auto-reply** column checkbox. Applies on the next scheduler tick. Lifetime: holds until that agent re-registers (close + reopen Claude Code in that terminal).
+2. **Live from the Command Center** — flip the **Auto-reply** column checkbox. Applies on the next scheduler tick. Lifetime: holds until that agent re-registers (close + reopen the CLI in that terminal).
 
 When opted out: the Stop hook still reads the inbox (so messages don't pile up) but never emits a continuation, and the auto-nudge scheduler skips that agent at the SQL filter — no keystroke is sent.
 
@@ -375,16 +438,20 @@ The Command Center fires a macOS desktop notification (via `osascript display no
 
 ## Autonomous mode setup
 
-By default, you'd have to tell Claude *"check my inbox"* manually every time. That defeats the purpose. Autonomous mode is installed automatically when you run `claudelink init` or `claudelink init --global` — it writes a `CLAUDE.md` file in the appropriate directory:
+By default, you'd have to tell every agent *"check my inbox"* manually every time. That defeats the purpose. Autonomous mode is installed automatically when you run `claudelink init` — it writes the right project-instructions file for whichever CLIs you flagged:
 
-- `init --global` → writes to `~/.claude/CLAUDE.md` (all projects)
-- `init` → writes to `./CLAUDE.md` (current project only)
+| Flag | File written (project) | File written (`--global`) |
+|---|---|---|
+| `--claude` | `./CLAUDE.md` | `~/.claude/CLAUDE.md` |
+| `--codex` | `./AGENTS.md` | `~/.codex/AGENTS.md` |
+| `--gemini` | `./GEMINI.md` | `~/.gemini/GEMINI.md` |
+| `--goose` | `./.goosehints` | `~/.config/goose/.goosehints` |
 
-If you already have a `CLAUDE.md`, the ClaudeLink instructions are appended without overwriting your existing content. Running init multiple times is safe — no duplication.
+If the file already exists, the ClaudeLink instructions are appended without overwriting your existing content. Running init multiple times is safe — there's a marker check, no duplication.
 
-### What it teaches Claude
+### What it teaches the agent
 
-The `CLAUDE.md` file instructs every Claude Code session to:
+Every instruction file (CLAUDE.md / AGENTS.md / GEMINI.md / .goosehints) tells the agent to:
 
 - **Check inbox automatically** before and after every task
 - **Send updates proactively** to other agents when work is completed
@@ -446,24 +513,18 @@ One instruction from you. All the communication happens automatically.
 
 ## Configuration
 
-ClaudeLink stores its database at `~/.claudelink/nexus.db`. The path is fixed so all Claude Code instances across all projects converge on the same hub.
+ClaudeLink stores its database at `~/.claudelink/nexus.db`. The path is fixed so every agent across every project (and across all four supported CLIs) converges on the same hub.
 
-### `.mcp.json` (per-project)
-```json
-{
-  "mcpServers": {
-    "claudelink": {
-      "type": "stdio",
-      "command": "claudelink-server"
-    }
-  }
-}
-```
+### Configuration files (per CLI)
 
-### `~/.claude.json` (global via CLI)
-```bash
-claude mcp add --scope user claudelink -- claudelink-server
-```
+Each CLI has its own MCP config file format. ClaudeLink writes the right one for whichever flag you pass to `claudelink init`:
+
+| CLI | Config file | Schema |
+|---|---|---|
+| Claude Code | `.mcp.json` (project) / `~/.claude.json` (global) | `{ "mcpServers": { "claudelink": { "command": "claudelink-server" } } }` |
+| Codex CLI | `~/.codex/config.toml` | `[mcp_servers.claudelink]` with `command = "claudelink-server"` |
+| Gemini CLI | `.gemini/settings.json` (project) / `~/.gemini/settings.json` (global) | `{ "mcpServers": { "claudelink": { "command": "claudelink-server" } } }` |
+| Goose | `~/.config/goose/config.yaml` | `extensions: { claudelink: { cmd: claudelink-server, type: stdio, ... } }` |
 
 ---
 
@@ -492,17 +553,19 @@ claude mcp add --scope user claudelink -- claudelink-server
 
 ## FAQ
 
-### Wait, does `npx claudelink init` start Claude?
+### Wait, does `npx claudelink init` start any of the CLIs?
 
-**No.** You only run `npx claudelink init` once. It's a setup command that writes a config file (`.mcp.json`) telling Claude Code to connect to ClaudeLink on startup. After that, you never need to run it again — your daily workflow is exactly the same:
+**No.** `claudelink init` is a one-time setup command. It writes the appropriate config file (`.mcp.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`, `~/.config/goose/config.yaml`) telling each CLI to connect to ClaudeLink on startup. After that, you never need to run it again — your daily workflow is whatever you'd normally do:
 
 ```bash
-claude                                # standard
-claude --dangerously-skip-permissions # auto-permissions
-claude --allowedTools "mcp__claudelink__*"  # auto-approve only ClaudeLink tools
+claude                                              # Claude Code
+codex                                               # Codex CLI
+gemini                                              # Gemini CLI
+goose session                                       # Goose
+claude --allowedTools "mcp__claudelink__*"          # Claude with auto-approve for ClaudeLink tools
 ```
 
-Claude Code reads `.mcp.json` on startup, sees ClaudeLink is configured, connects automatically. The tools just appear.
+Each CLI reads its own config on startup, sees ClaudeLink is configured, connects automatically. The tools just appear.
 
 ### How do I disable ClaudeLink?
 
@@ -536,7 +599,13 @@ Yes — set `"disabled": true` in the `.mcp.json` block:
 
 ### Will agents talk to each other across machines?
 
-Not yet — current backend is local SQLite. Multi-machine support (a networked backend) is on the contributions roadmap below.
+**Designed and approved for v1.2.** Hub-and-spoke architecture (one laptop owns the SQLite DB and a `/api/v1/` HTTP API; the other runs a small spoke daemon that polls the hub and dispatches local keystrokes). Bearer-token auth, LAN-bound by default. Full design doc at [`docs/multi-machine-design.md`](docs/multi-machine-design.md). Build is queued behind smoke testing of v1.3.
+
+### Can I add another MCP-compatible CLI that isn't on the supported list yet?
+
+Yes. Manual route: point the CLI's MCP config at `claudelink-server` (each CLI has its own config file format), and add a copy of [the AGENTS.md template](docs/) to the project. The MCP layer doesn't care which CLI is on the other end.
+
+If you'd like a one-command `--<your-cli>` flag, [open an issue](https://github.com/jaysidd/claudelink/issues) with the CLI name and the path to its MCP config file format. Adding a flag is roughly an hour of work.
 
 ### Does this work on Windows?
 
@@ -557,7 +626,10 @@ node dist/index.js          # run MCP server directly
 node dist/cli.js status     # exercise CLI
 ```
 
-### Roadmap ideas
+### Roadmap
+
+- **v1.2 — Multi-machine hub/spoke** *(designed and approved, build queued)* — see [`docs/multi-machine-design.md`](docs/multi-machine-design.md)
+- **More CLI integrations** — Cursor CLI, Amazon Q Developer CLI, opencode, Cline, Continue.dev. PRs welcome; the pattern is small and repeatable.
 - **Channels / topics** — named buses for topic-based collaboration
 - **Message search & history** — query past messages, not just unread
 - **Structured payloads** — file paths, code snippets, diffs as first-class types
@@ -565,7 +637,6 @@ node dist/cli.js status     # exercise CLI
 - **Agent templates** — pre-built role configs for common workflows
 - **Webhooks** — push agent activity to external services
 - **Encryption at rest**
-- **Multi-machine support** — networked backend so swarms span hosts
 
 If you ship one of these, send a PR. If you ship something we didn't think of, send it anyway.
 
@@ -577,10 +648,14 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-Built by [Jay Siddiqi](https://github.com/jaysidd). If ClaudeLink helps your workflow, **star the repo** and share it with your team — discoverability is everything for an open-source project.
+Built by [Jay Siddiqi](https://github.com/jaysidd). MIT licensed, built in the open, no telemetry, no cloud.
+
+If ClaudeLink helps your workflow, **star the repo** and share it with someone running multiple AI coding agents — discoverability is everything for an open-source project, and a single coordinated mesh of Claude + Codex + Gemini + Goose really is a different category of tool than any single CLI on its own.
+
+Bug reports, feature requests, and PRs welcome at [github.com/jaysidd/claudelink/issues](https://github.com/jaysidd/claudelink/issues).
 
 ---
 
 ### Keywords
 
-claudelink, claude link, claude code, claude code mcp, claude code multi-agent, claude code automation, claude code command center, claude code productivity, claude code orchestration, mcp server, model context protocol, multi-agent communication, ai agent collaboration, multi-terminal ai, agent-to-agent messaging, autonomous ai agents, autonomous claude code, ai swarm, multi-agent system, ai team simulation, agent message bus, agent mesh, ai agent hub, collaborative ai agents, claude mcp server, sqlite mcp, iterm2 ai, tmux ai, terminal ai agents, ai agent framework, agent communication protocol, ai pair programming, ai code review, multi-agent workflow, ai workflow automation, agent orchestration, autonomous developer agents, ai dev productivity, 5x developer, ai pipeline, ai infrastructure, claude code plugin, claude code extension, ai developer tools, open source ai tools, mcp tools.
+claudelink, claude link, claude code, codex cli, openai codex, gemini cli, google gemini cli, goose cli, block goose, mcp server, model context protocol, multi-model ai agents, multi-cli agents, mix claude codex gemini, heterogeneous ai swarm, claude code mcp, codex cli mcp, gemini cli mcp, goose mcp extension, multi-agent communication, agent-to-agent messaging, autonomous ai agents, autonomous coding agents, ai swarm, multi-agent system, agent message bus, agent mesh, ai agent hub, collaborative ai agents, claude code multi-agent, codex cli multi-agent, gemini cli multi-agent, claude code automation, claude code command center, ai command center, sqlite mcp, iterm2 ai, tmux ai, terminal ai agents, agent communication protocol, ai pair programming, ai code review, multi-agent workflow, agent orchestration, autonomous developer agents, ai dev productivity, 5x developer, local-first ai, no-cloud ai, on-machine ai, open-source multi-agent, mcp ecosystem, mcp interoperability, claude code plugin, codex cli plugin, mcp tools.
