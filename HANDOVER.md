@@ -6,31 +6,32 @@
 
 ---
 
-## Current status: v1.3 multi-model support implemented (about to commit); v1.2 multi-machine design approved (Phase 0); v1.1.2 npm publish still pending OTP
+## Current status: v1.3 multi-model now spans Claude/Codex/Gemini; v1.2 multi-machine design approved (Phase 0); v1.1.2 npm publish still pending OTP
 
 **Open items in priority order:**
 
-1. **Commit v1.3 multi-model.** `src/cli.ts` now supports `claudelink init --codex` (writes `AGENTS.md`, prints `~/.codex/config.toml` snippet) and `claudelink init --both`. README intro + Installation section advertise multi-model. All four init paths smoke-tested in temp dirs; idempotent on re-run.
-2. **v1.2 multi-machine design approved.** Full design doc at `docs/multi-machine-design.md`, committed `d4bb0ee` and pushed. Phase 0 sign-off complete; the four open questions resolved (3s short-poll, MCP-driven heartbeat, query-param-on-first-visit + cookie, auto-suffix with machine-id on hostname collision). Phase 1 build cleared to start when the user has the M5 set up.
-3. **Favicon shipped.** Bold lavender L with mint node-cap dot. `public/favicon.svg`, inlined in ui-server, head link wired. Commit `8ad9812`, pushed.
-4. **v1.1.2 npm publish.** Still pending interactive 2FA OTP. Only blocks the npmjs.com README; tag + GitHub release are live.
+1. **v1.3 multi-model (Claude + Codex + Gemini).** Codex CLI piece committed `68b4325`, pushed. Gemini CLI piece staged, about to commit. Codex CLI agent registration verified live on the user's machine. Gemini CLI smoke test pending (user has gemini 0.41.2 installed, global setup applied to `~/.gemini/settings.json` + `~/.gemini/GEMINI.md`).
+2. **v1.2 multi-machine design approved.** Full design doc at `docs/multi-machine-design.md`, committed `d4bb0ee` and pushed. Phase 0 sign-off complete. Phase 1 build cleared to start when the user has the M5 set up.
+3. **Favicon shipped.** Bold lavender L with mint node-cap dot. Commit `8ad9812`, pushed.
+4. **v1.1.2 npm publish.** Still pending interactive 2FA OTP. Only blocks the npmjs.com README; tag + GitHub release are live. When the user does the publish dance, bump to `v1.3.0` first to capture the multi-model work in the same release.
 
 ## What was added on 2026-05-08
 
-### v1.3 — Codex CLI / multi-model support
+### v1.3 — multi-model support (Claude Code + Codex CLI + Gemini CLI)
 
-The MCP server itself was already model-agnostic. What was missing was the install path for Codex CLI. Added.
+The MCP server itself was already model-agnostic. What was missing was the install paths for the other CLIs. Both added in v1.3.
 
 | File | Change |
 |---|---|
-| `src/cli.ts` | New `AGENTS_MD_CONTENT` (parallel to `CLAUDE_MD_CONTENT`, more model-neutral phrasing) + `AGENTS_MD_MARKER`. New `installAgentsMd(scope)` and `addCodexMcp(scope)` helpers. `initProject` and `initGlobal` refactored to accept `Client[]` — `["claude"]` (default), `["codex"]`, or `["claude", "codex"]`. New `--codex` and `--both` flags. Help text updated. |
-| `README.md` | Lead paragraph mentions multi-model explicitly. Installation section split into Claude Code / Codex CLI / per-project blocks. New "Multi-model support" callout explains the MCP layer is open and notes that the Stop hook is Claude-Code-only — Codex falls back to the auto-nudge cadence. |
+| `src/cli.ts` | `Client` type extended to `"claude" \| "codex" \| "gemini"`. Added `AGENTS_MD_CONTENT` (shared by Codex AGENTS.md and Gemini GEMINI.md). Added `installAgentsMd`, `addCodexMcp`, `installGeminiMd`, `addGeminiMcp` helpers. `initProject` and `initGlobal` walk the `Client[]` array and run the relevant install steps. Flag parsing rewritten to be **additive**: `--claude`, `--codex`, `--gemini` stack; `--both` is a Claude+Codex shortcut; `--all` does all three. Default with no flag = Claude only (preserves v1.1.x behavior). Help text restructured around Client flags + Examples. |
+| `README.md` | Lead paragraph names all three clients. Installation split into per-client blocks plus an `--all --global` shortcut. Multi-model callout updated to chain through Gemini. Requirements list extended. |
 
 ### Architectural notes worth keeping
 
-- Codex CLI's AGENTS.md discovery is **hierarchical**: `~/.codex/AGENTS.override.md` → `~/.codex/AGENTS.md` → walk Git root down to cwd. Files merge later-overrides-earlier. Our `installAgentsMd` writes to either `~/.codex/AGENTS.md` (global) or `<cwd>/AGENTS.md` (project) — both first-class to Codex.
-- Codex CLI MCP config lives at `~/.codex/config.toml` under `[mcp_servers.<name>]`. Required field is `command`; ours is just `claudelink-server`. The `codex mcp add claudelink -- claudelink-server` helper writes this for the user.
-- Stop hook does NOT carry over to Codex CLI. Hooks contract is Claude-Code-specific. Codex agents only get auto-nudge keystroke cadence — fine for the user's audit use case.
+- **Codex CLI**: MCP config at `~/.codex/config.toml` under `[mcp_servers.<name>]` (TOML). AGENTS.md discovery is hierarchical: `~/.codex/AGENTS.override.md` → `~/.codex/AGENTS.md` → walk Git root down to cwd. We use `codex mcp add` for the registration, falling back to printing the snippet if the codex CLI isn't on PATH.
+- **Gemini CLI**: MCP config at `~/.gemini/settings.json` (global) or `<project>/.gemini/settings.json` (project) under the `mcpServers` JSON key — same shape as Claude's `.mcp.json`. GEMINI.md goes at the project root (or `~/.gemini/GEMINI.md` for global). We do an in-process JSON merge into settings.json, preserving any pre-existing keys (verified on the user's machine: `security.auth.selectedType` was kept while `mcpServers.claudelink` was added).
+- **Stop hook does NOT carry over** to Codex or Gemini. Hooks contract is Claude-Code-specific. Both fall back to auto-nudge keystroke cadence — fine for the user's audit use case.
+- **Shared template, three filenames.** Codex's AGENTS.md and Gemini's GEMINI.md both contain the same `AGENTS_MD_CONTENT` body. Same marker (`## ClaudeLink - Multi-Agent Coordination`) so idempotency check works for both. Claude's CLAUDE.md uses the older v1.0 template (`CLAUDE_MD_CONTENT` with marker `## ClaudeLink - Autonomous Agent Communication`) — kept identical to v1.1.x to avoid disturbing existing users.
 
 ### Favicon
 

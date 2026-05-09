@@ -47,7 +47,7 @@ const CLAUDE_MD_MARKER = "## ClaudeLink - Autonomous Agent Communication";
 const AGENTS_MD_CONTENT = `
 ## ClaudeLink - Multi-Agent Coordination
 
-You are part of a multi-agent team. Other agents (Codex CLI, Claude Code, or other MCP-compatible clients) may be running in separate terminals — and possibly on other machines on the local network — and can send you messages at any time via ClaudeLink.
+You are part of a multi-agent team. Other agents (Codex CLI, Claude Code, Gemini CLI, or other MCP-compatible clients) may be running in separate terminals — and possibly on other machines on the local network — and can send you messages at any time via ClaudeLink.
 
 ### Inbox discipline
 
@@ -76,7 +76,7 @@ You are part of a multi-agent team. Other agents (Codex CLI, Claude Code, or oth
 
 const AGENTS_MD_MARKER = "## ClaudeLink - Multi-Agent Coordination";
 
-type Client = "claude" | "codex";
+type Client = "claude" | "codex" | "gemini";
 
 function installClaudeMd(scope: "global" | "project") {
   let claudeMdPath: string;
@@ -171,6 +171,67 @@ function addCodexMcp(scope: "global" | "project"): boolean {
   }
 }
 
+function installGeminiMd(scope: "global" | "project") {
+  let geminiMdPath: string;
+
+  if (scope === "global") {
+    const geminiDir = path.join(os.homedir(), ".gemini");
+    if (!fs.existsSync(geminiDir)) {
+      fs.mkdirSync(geminiDir, { recursive: true });
+    }
+    geminiMdPath = path.join(geminiDir, "GEMINI.md");
+  } else {
+    geminiMdPath = path.join(process.cwd(), "GEMINI.md");
+  }
+
+  if (fs.existsSync(geminiMdPath)) {
+    const existing = fs.readFileSync(geminiMdPath, "utf-8");
+    if (existing.includes(AGENTS_MD_MARKER)) {
+      console.log(`  GEMINI.md already has ClaudeLink instructions (${geminiMdPath})`);
+      return;
+    }
+    const separator = existing.endsWith("\n") ? "\n" : "\n\n";
+    fs.writeFileSync(geminiMdPath, existing + separator + AGENTS_MD_CONTENT + "\n");
+    console.log(`  Added ClaudeLink instructions to existing ${geminiMdPath}`);
+  } else {
+    const header = scope === "global" ? "# Global Gemini Instructions\n\n" : "# Project Agent Instructions\n\n";
+    fs.writeFileSync(geminiMdPath, header + AGENTS_MD_CONTENT + "\n");
+    console.log(`  Created ${geminiMdPath} with ClaudeLink instructions`);
+  }
+}
+
+function addGeminiMcp(scope: "global" | "project"): boolean {
+  let geminiDir: string;
+  if (scope === "global") {
+    geminiDir = path.join(os.homedir(), ".gemini");
+  } else {
+    geminiDir = path.join(process.cwd(), ".gemini");
+  }
+  if (!fs.existsSync(geminiDir)) {
+    fs.mkdirSync(geminiDir, { recursive: true });
+  }
+  const settingsPath = path.join(geminiDir, "settings.json");
+
+  let settings: any = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    } catch {
+      console.log(`  Warning: could not parse ${settingsPath} — leaving file alone, paste this manually:`);
+      console.log(`    "mcpServers": { "claudelink": { "command": "claudelink-server" } }`);
+      return false;
+    }
+  }
+  if (!settings.mcpServers) settings.mcpServers = {};
+  settings.mcpServers["claudelink"] = { command: "claudelink-server" };
+
+  const tmp = settingsPath + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n");
+  fs.renameSync(tmp, settingsPath);
+  console.log(`  Updated ${settingsPath} (added mcpServers.claudelink)`);
+  return true;
+}
+
 function printBanner() {
   console.log(`
     ╔═══════════════════════════════════════════╗
@@ -220,6 +281,11 @@ function initProject(clients: Client[]) {
     installAgentsMd("project");
   }
 
+  if (clients.includes("gemini")) {
+    addGeminiMcp("project");
+    installGeminiMd("project");
+  }
+
   const lines: string[] = ["", "  ClaudeLink is ready!", "", "  What was set up:"];
   if (clients.includes("claude")) {
     lines.push("    - .mcp.json: MCP server config for Claude Code");
@@ -229,6 +295,10 @@ function initProject(clients: Client[]) {
     lines.push("    - AGENTS.md: multi-agent instructions for Codex CLI");
     lines.push("    - Codex MCP config snippet printed above");
   }
+  if (clients.includes("gemini")) {
+    lines.push("    - .gemini/settings.json: MCP server config for Gemini CLI");
+    lines.push("    - GEMINI.md: multi-agent instructions for Gemini CLI");
+  }
   lines.push("");
   lines.push("  Next steps:");
   if (clients.includes("claude")) {
@@ -236,6 +306,9 @@ function initProject(clients: Client[]) {
   }
   if (clients.includes("codex")) {
     lines.push("    - Restart Codex CLI in your terminals; it will pick up AGENTS.md and the MCP server");
+  }
+  if (clients.includes("gemini")) {
+    lines.push("    - Restart Gemini CLI in your terminals; it will pick up GEMINI.md and the MCP server");
   }
   lines.push("");
   lines.push(`  Data stored in: ${NEXUS_DIR}/nexus.db`);
@@ -276,6 +349,12 @@ function initGlobal(clients: Client[]) {
     installAgentsMd("global");
   }
 
+  let geminiMcpOk = false;
+  if (clients.includes("gemini")) {
+    geminiMcpOk = addGeminiMcp("global");
+    installGeminiMd("global");
+  }
+
   const lines: string[] = ["", "  ClaudeLink is ready (global install)!", "", "  What was set up:"];
   if (clients.includes("claude")) {
     lines.push(`    - Claude Code MCP: ${claudeMcpOk ? "registered globally" : "manual step printed above"}`);
@@ -284,6 +363,10 @@ function initGlobal(clients: Client[]) {
   if (clients.includes("codex")) {
     lines.push(`    - Codex CLI MCP: ${codexMcpOk ? "registered globally" : "manual step printed above"}`);
     lines.push("    - ~/.codex/AGENTS.md: multi-agent instructions");
+  }
+  if (clients.includes("gemini")) {
+    lines.push(`    - Gemini CLI MCP: ${geminiMcpOk ? "registered globally in ~/.gemini/settings.json" : "manual step printed above"}`);
+    lines.push("    - ~/.gemini/GEMINI.md: multi-agent instructions");
   }
   lines.push("");
   lines.push(`  Data stored in: ${NEXUS_DIR}/nexus.db`);
@@ -295,12 +378,22 @@ function showHelp() {
   Usage: claudelink <command>
 
   Commands:
-    init                       Set up ClaudeLink for Claude Code in this project (.mcp.json + CLAUDE.md)
-    init --global              Set up ClaudeLink for Claude Code globally (~/.claude/CLAUDE.md)
-    init --codex               Set up ClaudeLink for Codex CLI in this project (AGENTS.md + Codex MCP snippet)
-    init --codex --global      Set up ClaudeLink for Codex CLI globally (~/.codex/AGENTS.md + codex mcp add)
-    init --both                Set up for Claude Code AND Codex CLI (project)
-    init --both --global       Set up for Claude Code AND Codex CLI (global)
+    init [client flags]        Set up ClaudeLink in this project for one or more clients
+    init --global [...]        Same, but install globally for the chosen clients
+
+  Client flags (combine as needed; default is --claude):
+    --claude                   Claude Code (.mcp.json + CLAUDE.md)
+    --codex                    OpenAI Codex CLI (~/.codex/config.toml + AGENTS.md)
+    --gemini                   Google Gemini CLI (~/.gemini/settings.json + GEMINI.md)
+    --both                     Shortcut for --claude --codex
+    --all                      Shortcut for --claude --codex --gemini
+
+  Examples:
+    claudelink init                       Claude Code in current project
+    claudelink init --gemini              Gemini CLI in current project
+    claudelink init --codex --gemini      Codex + Gemini in current project
+    claudelink init --all --global        All three clients, globally
+
     status                     Show registered agents and their status
     ui                         Launch the Command Center UI in your browser
     ui --stop                  Stop the Command Center UI
@@ -570,13 +663,26 @@ printBanner();
 switch (command) {
   case "init": {
     const isGlobal = args.includes("--global");
+    const wantAll = args.includes("--all");
     const wantBoth = args.includes("--both");
+    const wantClaude = args.includes("--claude");
     const wantCodex = args.includes("--codex");
-    const clients: Client[] = wantBoth
-      ? ["claude", "codex"]
-      : wantCodex
-        ? ["codex"]
-        : ["claude"];
+    const wantGemini = args.includes("--gemini");
+
+    let clients: Client[];
+    if (wantAll) {
+      clients = ["claude", "codex", "gemini"];
+    } else if (wantBoth) {
+      clients = ["claude", "codex"];
+    } else {
+      const explicit = [
+        wantClaude ? "claude" : null,
+        wantCodex ? "codex" : null,
+        wantGemini ? "gemini" : null,
+      ].filter(Boolean) as Client[];
+      clients = explicit.length > 0 ? explicit : ["claude"];
+    }
+
     if (isGlobal) {
       initGlobal(clients);
     } else {

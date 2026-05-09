@@ -8,7 +8,7 @@
 [![Built for Claude Code](https://img.shields.io/badge/Built%20for-Claude%20Code-a855f7.svg?style=flat-square)](https://claude.com/claude-code)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-f59e0b.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
-ClaudeLink is an [MCP](https://modelcontextprotocol.io/) server that turns multiple AI coding agents (Claude Code, OpenAI Codex CLI, or any MCP-compatible client) into a **single coordinated team**. Open four terminals, give each one a role — reviewer, developer, tester, architect — and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away. Mix models freely: a Claude reviewer talking to a Codex developer is a fully supported pattern.
+ClaudeLink is an [MCP](https://modelcontextprotocol.io/) server that turns multiple AI coding agents (Claude Code, OpenAI Codex CLI, Google Gemini CLI, or any MCP-compatible client) into a **single coordinated team**. Open four terminals, give each one a role — reviewer, developer, tester, architect — and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away. Mix models freely: a Claude reviewer talking to a Codex developer talking to a Gemini tester is a fully supported pattern.
 
 You don't need to invent a multi-agent framework. You already have one.
 
@@ -202,14 +202,28 @@ claude mcp add --scope user claudelink -- claudelink-server
 **Codex CLI (global):**
 ```bash
 codex mcp add claudelink -- claudelink-server
+# or: claudelink init --codex --global
 ```
 
-**Per-project (auto-detects which client):**
+**Gemini CLI (global):**
+```bash
+claudelink init --gemini --global
+# Merges mcpServers.claudelink into ~/.gemini/settings.json + writes ~/.gemini/GEMINI.md
+```
+
+**Everything at once (global):**
+```bash
+claudelink init --all --global   # Claude + Codex + Gemini, three clients on one mesh
+```
+
+**Per-project (mix and match):**
 ```bash
 cd your-project
-npx claudelink init           # Claude Code: writes .mcp.json + CLAUDE.md
-npx claudelink init --codex   # Codex CLI: writes AGENTS.md + prints config snippet
-npx claudelink init --both    # both clients in the same project
+npx claudelink init                       # Claude Code (.mcp.json + CLAUDE.md)
+npx claudelink init --codex               # Codex CLI (AGENTS.md + TOML snippet)
+npx claudelink init --gemini              # Gemini CLI (.gemini/settings.json + GEMINI.md)
+npx claudelink init --codex --gemini      # stack flags additively
+npx claudelink init --all                 # all three clients in one project
 ```
 
 ### 3. Restart your terminals
@@ -218,11 +232,11 @@ ClaudeLink tools appear automatically. Done.
 
 ### Multi-model support
 
-ClaudeLink doesn't care which model is on the other end of an MCP connection. The MCP layer is open — any compliant client can register and participate. A Claude advisor can message a Codex developer and back, and the Command Center shows them as peers in the same mesh. The only Claude-Code-specific layer is the optional Stop hook (which gives instant turn-end pickup); Codex agents fall back to the auto-nudge scheduler's 5-minute cadence, which is fine for almost every workflow.
+ClaudeLink doesn't care which model is on the other end of an MCP connection. The MCP layer is open — any compliant client can register and participate. A Claude advisor can message a Codex developer can message a Gemini tester, and the Command Center shows them all as peers on the same mesh. The only Claude-Code-specific layer is the optional Stop hook (which gives instant turn-end pickup); Codex and Gemini agents fall back to the auto-nudge scheduler's keystroke cadence, which is fine for almost every workflow.
 
 ### Requirements
 - Node.js 18+
-- An MCP-compatible client: Claude Code CLI or OpenAI Codex CLI
+- An MCP-compatible client: Claude Code CLI, OpenAI Codex CLI, or Google Gemini CLI
 - macOS or Linux (Windows works for messaging; auto-nudge requires tmux)
 
 ---
