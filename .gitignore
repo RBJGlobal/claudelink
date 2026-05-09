@@ -5,3 +5,7 @@ dist/
 *.db-shm
 .DS_Store
 .playwright-mcp/
+
+# Personal / founder-only docs (not part of the public repo)
+docs/founder-playbook.md
+
