@@ -78,12 +78,30 @@ function injectKeystroke(c: NudgeCandidate, text: string): "ok" | "skip" | "fail
     }
 
     if (app === "iterm2") {
+      // Two-write dispatch — required for Codex CLI compatibility.
+      //
+      // iTerm2's `write text` with multi-character content goes through a
+      // bracketed-paste path: the bytes arrive at the receiving process as a
+      // PASTE, not as keystrokes. CLIs whose TUI reads keyboard events (Codex)
+      // see the embedded CR/LF as "characters within pasted content," not as
+      // an Enter key press, and the prompt sits in the input field unsubmitted.
+      //
+      // Empirically: a SECOND `write text` call containing only the CR byte
+      // (no other characters, no newline) is treated as a single keystroke and
+      // delivered as the Enter key. So we split: text first (without newline),
+      // then a tiny delay, then a standalone CR write (also without newline).
+      // The delay keeps the two events ordered as separate dispatches.
+      //
+      // This is correct for Claude Code and Gemini CLI too — both accept CR
+      // as the submit byte.
       const script = `tell application "iTerm2"
         repeat with w in windows
           repeat with t in tabs of w
             repeat with s in sessions of t
               if (tty of s) is "${escapeForAppleScript(c.tty)}" then
-                tell s to write text "${escapeForAppleScript(text)}"
+                tell s to write text "${escapeForAppleScript(text)}" without newline
+                delay 0.05
+                tell s to write text (ASCII character 13) without newline
               end if
             end repeat
           end repeat
