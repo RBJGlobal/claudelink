@@ -2,11 +2,45 @@
 
 > **Purpose:** First thing to read when resuming work on the claudelink package itself. `CLAUDE.md` is the always-on directive layer; this file is the session-resume pointer.
 >
-> **Last session:** 2026-05-07
+> **Last session:** 2026-05-08
 
 ---
 
-## Current status: v1.1.2 tagged + pushed to GitHub; npm publish pending user OTP
+## Current status: v1.3 multi-model support implemented (about to commit); v1.2 multi-machine design approved (Phase 0); v1.1.2 npm publish still pending OTP
+
+**Open items in priority order:**
+
+1. **Commit v1.3 multi-model.** `src/cli.ts` now supports `claudelink init --codex` (writes `AGENTS.md`, prints `~/.codex/config.toml` snippet) and `claudelink init --both`. README intro + Installation section advertise multi-model. All four init paths smoke-tested in temp dirs; idempotent on re-run.
+2. **v1.2 multi-machine design approved.** Full design doc at `docs/multi-machine-design.md`, committed `d4bb0ee` and pushed. Phase 0 sign-off complete; the four open questions resolved (3s short-poll, MCP-driven heartbeat, query-param-on-first-visit + cookie, auto-suffix with machine-id on hostname collision). Phase 1 build cleared to start when the user has the M5 set up.
+3. **Favicon shipped.** Bold lavender L with mint node-cap dot. `public/favicon.svg`, inlined in ui-server, head link wired. Commit `8ad9812`, pushed.
+4. **v1.1.2 npm publish.** Still pending interactive 2FA OTP. Only blocks the npmjs.com README; tag + GitHub release are live.
+
+## What was added on 2026-05-08
+
+### v1.3 — Codex CLI / multi-model support
+
+The MCP server itself was already model-agnostic. What was missing was the install path for Codex CLI. Added.
+
+| File | Change |
+|---|---|
+| `src/cli.ts` | New `AGENTS_MD_CONTENT` (parallel to `CLAUDE_MD_CONTENT`, more model-neutral phrasing) + `AGENTS_MD_MARKER`. New `installAgentsMd(scope)` and `addCodexMcp(scope)` helpers. `initProject` and `initGlobal` refactored to accept `Client[]` — `["claude"]` (default), `["codex"]`, or `["claude", "codex"]`. New `--codex` and `--both` flags. Help text updated. |
+| `README.md` | Lead paragraph mentions multi-model explicitly. Installation section split into Claude Code / Codex CLI / per-project blocks. New "Multi-model support" callout explains the MCP layer is open and notes that the Stop hook is Claude-Code-only — Codex falls back to the auto-nudge cadence. |
+
+### Architectural notes worth keeping
+
+- Codex CLI's AGENTS.md discovery is **hierarchical**: `~/.codex/AGENTS.override.md` → `~/.codex/AGENTS.md` → walk Git root down to cwd. Files merge later-overrides-earlier. Our `installAgentsMd` writes to either `~/.codex/AGENTS.md` (global) or `<cwd>/AGENTS.md` (project) — both first-class to Codex.
+- Codex CLI MCP config lives at `~/.codex/config.toml` under `[mcp_servers.<name>]`. Required field is `command`; ours is just `claudelink-server`. The `codex mcp add claudelink -- claudelink-server` helper writes this for the user.
+- Stop hook does NOT carry over to Codex CLI. Hooks contract is Claude-Code-specific. Codex agents only get auto-nudge keystroke cadence — fine for the user's audit use case.
+
+### Favicon
+
+Bold lavender `L` + mint green node-cap dot. Visible at 16×16. Constant inlined in `src/ui-server.ts`, route at `/favicon.svg`, head link wired. `public/favicon.svg` is the canonical asset; npm `files` array is unchanged because the SVG is inlined into `dist/ui-server.js`.
+
+### v1.2 multi-machine design
+
+Hub-and-spoke architecture: one laptop owns the SQLite DB and `/api/v1/...` HTTP API, the other runs a small spoke daemon that polls and dispatches local keystrokes. Schema v3 (adds `host` column), optional bearer token (LAN-only, no TLS in v1.2), 8-phase build plan. Full doc at `docs/multi-machine-design.md`.
+
+## Prior status: v1.1.2 tagged + pushed to GitHub; npm publish pending user OTP
 
 Feature commit `8f80d79`, release commit `d4ee281`, tag `v1.1.2` — all on `origin/main`. The package has 2FA-on-publish enabled, so `npm publish` requires a fresh browser OTP each time and could not be completed autonomously. **First action on resume: run `npm publish` from the user's terminal, complete the browser OTP, then `npm view claudelink version` to verify 1.1.2 is on registry.**
 

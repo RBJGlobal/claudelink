@@ -44,6 +44,40 @@ You are part of a multi-agent team. Other agents may be running in separate term
 
 const CLAUDE_MD_MARKER = "## ClaudeLink - Autonomous Agent Communication";
 
+const AGENTS_MD_CONTENT = `
+## ClaudeLink - Multi-Agent Coordination
+
+You are part of a multi-agent team. Other agents (Codex CLI, Claude Code, or other MCP-compatible clients) may be running in separate terminals — and possibly on other machines on the local network — and can send you messages at any time via ClaudeLink.
+
+### Inbox discipline
+
+- **Before** starting any task: call \`read_inbox\` to check for messages
+- **After** completing any task: call \`read_inbox\` again — new mail may have arrived while you were working
+- If a message asks you to change course, do so immediately
+- If a message is a question from another agent, reply via \`send\` before continuing your own work
+- High-priority messages take precedence
+
+### Proactive collaboration
+
+- When you finish work another agent might care about, call \`send\` to tell them
+- If you hit a problem another agent's role could help with, call \`send\` to ask
+- For decisions that affect the project, call \`post_bulletin\`
+- If you're blocked, say so and check inbox again
+
+### Communication shortcuts
+
+- "check messages" — call \`read_inbox\`
+- "ask the [role]" — call \`send\` to that role and check inbox for the reply
+- "tell the [role]" — call \`send\` (one-way)
+- "who's online" — call \`get_agents\`
+- "update the board" — call \`post_bulletin\`
+- "check the board" — call \`get_bulletin\`
+`.trim();
+
+const AGENTS_MD_MARKER = "## ClaudeLink - Multi-Agent Coordination";
+
+type Client = "claude" | "codex";
+
 function installClaudeMd(scope: "global" | "project") {
   let claudeMdPath: string;
 
@@ -75,6 +109,68 @@ function installClaudeMd(scope: "global" | "project") {
   }
 }
 
+function installAgentsMd(scope: "global" | "project") {
+  let agentsMdPath: string;
+
+  if (scope === "global") {
+    const codexDir = path.join(os.homedir(), ".codex");
+    if (!fs.existsSync(codexDir)) {
+      fs.mkdirSync(codexDir, { recursive: true });
+    }
+    agentsMdPath = path.join(codexDir, "AGENTS.md");
+  } else {
+    agentsMdPath = path.join(process.cwd(), "AGENTS.md");
+  }
+
+  if (fs.existsSync(agentsMdPath)) {
+    const existing = fs.readFileSync(agentsMdPath, "utf-8");
+    if (existing.includes(AGENTS_MD_MARKER)) {
+      console.log(`  AGENTS.md already has ClaudeLink instructions (${agentsMdPath})`);
+      return;
+    }
+    const separator = existing.endsWith("\n") ? "\n" : "\n\n";
+    fs.writeFileSync(agentsMdPath, existing + separator + AGENTS_MD_CONTENT + "\n");
+    console.log(`  Added ClaudeLink instructions to existing ${agentsMdPath}`);
+  } else {
+    const header = scope === "global" ? "# Global Codex Instructions\n\n" : "# Project Agent Instructions\n\n";
+    fs.writeFileSync(agentsMdPath, header + AGENTS_MD_CONTENT + "\n");
+    console.log(`  Created ${agentsMdPath} with ClaudeLink instructions`);
+  }
+}
+
+function addCodexMcp(scope: "global" | "project"): boolean {
+  if (scope === "global") {
+    const { execSync } = require("child_process");
+    try {
+      execSync("codex mcp add claudelink -- claudelink-server", { stdio: "inherit" });
+      return true;
+    } catch {
+      console.log(`
+  Could not run "codex mcp add" automatically (is Codex CLI installed and on PATH?).
+
+  Add this block to ~/.codex/config.toml manually (create the file if needed):
+
+    [mcp_servers.claudelink]
+    command = "claudelink-server"
+      `);
+      return false;
+    }
+  } else {
+    console.log(`
+  For Codex CLI, add this to ~/.codex/config.toml (or .codex/config.toml in
+  this project for project-scoped config — Codex requires the project to be
+  trusted for project scope):
+
+    [mcp_servers.claudelink]
+    command = "claudelink-server"
+
+  Or run:
+    codex mcp add claudelink -- claudelink-server
+    `);
+    return true;
+  }
+}
+
 function printBanner() {
   console.log(`
     ╔═══════════════════════════════════════════╗
@@ -84,110 +180,114 @@ function printBanner() {
   `);
 }
 
-function initProject() {
+function initProject(clients: Client[]) {
   const cwd = process.cwd();
   const mcpJsonPath = path.join(cwd, ".mcp.json");
 
-  // Create ~/.claudelink directory
+  // Create ~/.claudelink directory (always)
   if (!fs.existsSync(NEXUS_DIR)) {
     fs.mkdirSync(NEXUS_DIR, { recursive: true });
     console.log(`  Created ${NEXUS_DIR}/`);
   }
 
-  // Read or create .mcp.json
-  let mcpConfig: any = { mcpServers: {} };
+  if (clients.includes("claude")) {
+    // Read or create .mcp.json
+    let mcpConfig: any = { mcpServers: {} };
 
-  if (fs.existsSync(mcpJsonPath)) {
-    try {
-      const content = fs.readFileSync(mcpJsonPath, "utf-8");
-      mcpConfig = JSON.parse(content);
-      if (!mcpConfig.mcpServers) {
-        mcpConfig.mcpServers = {};
+    if (fs.existsSync(mcpJsonPath)) {
+      try {
+        const content = fs.readFileSync(mcpJsonPath, "utf-8");
+        mcpConfig = JSON.parse(content);
+        if (!mcpConfig.mcpServers) {
+          mcpConfig.mcpServers = {};
+        }
+        console.log(`  Found existing .mcp.json`);
+      } catch {
+        console.log(`  Warning: Could not parse existing .mcp.json, creating fresh one`);
+        mcpConfig = { mcpServers: {} };
       }
-      console.log(`  Found existing .mcp.json`);
-    } catch {
-      console.log(`  Warning: Could not parse existing .mcp.json, creating fresh one`);
-      mcpConfig = { mcpServers: {} };
     }
+
+    mcpConfig.mcpServers["claudelink"] = MCP_SERVER_CONFIG;
+    fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n");
+    console.log(`  Updated ${mcpJsonPath}`);
+
+    installClaudeMd("project");
   }
 
-  // Add claudelink server config
-  mcpConfig.mcpServers["claudelink"] = MCP_SERVER_CONFIG;
+  if (clients.includes("codex")) {
+    addCodexMcp("project");
+    installAgentsMd("project");
+  }
 
-  fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n");
-  console.log(`  Updated ${mcpJsonPath}`);
-
-  // Install CLAUDE.md with autonomous mode instructions
-  installClaudeMd("project");
-
-  console.log(`
-  ClaudeLink is ready!
-
-  What was set up:
-    - .mcp.json: MCP server config (tells Claude Code to connect to ClaudeLink)
-    - CLAUDE.md: Autonomous mode instructions (agents check inbox automatically)
-
-  Next steps:
-    1. Restart Claude Code in your terminals
-    2. In each terminal, tell Claude to register:
-       "Register as a developer agent"
-       "Register as a code reviewer"
-    3. Agents can now communicate:
-       "Send a message to the reviewer: please check auth.ts"
-       "Check my inbox for messages"
-       "Post to the bulletin board: deployment at 3pm"
-
-  Data stored in: ${NEXUS_DIR}/nexus.db
-  Config written to: ${mcpJsonPath}
-  `);
+  const lines: string[] = ["", "  ClaudeLink is ready!", "", "  What was set up:"];
+  if (clients.includes("claude")) {
+    lines.push("    - .mcp.json: MCP server config for Claude Code");
+    lines.push("    - CLAUDE.md: autonomous-mode instructions for Claude Code");
+  }
+  if (clients.includes("codex")) {
+    lines.push("    - AGENTS.md: multi-agent instructions for Codex CLI");
+    lines.push("    - Codex MCP config snippet printed above");
+  }
+  lines.push("");
+  lines.push("  Next steps:");
+  if (clients.includes("claude")) {
+    lines.push("    - Restart Claude Code in your terminals; tell it 'register as a developer'");
+  }
+  if (clients.includes("codex")) {
+    lines.push("    - Restart Codex CLI in your terminals; it will pick up AGENTS.md and the MCP server");
+  }
+  lines.push("");
+  lines.push(`  Data stored in: ${NEXUS_DIR}/nexus.db`);
+  console.log(lines.join("\n") + "\n");
 }
 
-function initGlobal() {
-  // Create ~/.claudelink directory
+function initGlobal(clients: Client[]) {
+  // Create ~/.claudelink directory (always)
   if (!fs.existsSync(NEXUS_DIR)) {
     fs.mkdirSync(NEXUS_DIR, { recursive: true });
     console.log(`  Created ${NEXUS_DIR}/`);
   }
 
-  // Use claude mcp add command for proper global registration
-  const { execSync } = require("child_process");
-  let mcpSuccess = false;
-  try {
-    execSync("claude mcp add --scope user claudelink -- claudelink-server", {
-      stdio: "inherit",
-    });
-    mcpSuccess = true;
-  } catch {
-    console.log(`
+  let claudeMcpOk = false;
+  let codexMcpOk = false;
+
+  if (clients.includes("claude")) {
+    const { execSync } = require("child_process");
+    try {
+      execSync("claude mcp add --scope user claudelink -- claudelink-server", {
+        stdio: "inherit",
+      });
+      claudeMcpOk = true;
+    } catch {
+      console.log(`
   Could not run "claude mcp add" automatically.
 
-  Run this command manually to add ClaudeLink globally:
+  Run this command manually to add ClaudeLink globally for Claude Code:
 
     claude mcp add --scope user claudelink -- claudelink-server
-    `);
+      `);
+    }
+    installClaudeMd("global");
   }
 
-  // Install global CLAUDE.md with autonomous mode instructions
-  installClaudeMd("global");
-
-  if (mcpSuccess) {
-    console.log(`
-  ClaudeLink is ready (global install)!
-
-  What was set up:
-    - ~/.claude.json: MCP server config (available in ALL projects)
-    - ~/.claude/CLAUDE.md: Autonomous mode instructions (agents check inbox automatically)
-
-  Next steps:
-    1. Restart Claude Code in your terminals
-    2. In each terminal, tell Claude to register:
-       "Register as a developer agent"
-       "Register as a code reviewer"
-    3. Agents can now communicate!
-
-  Data stored in: ${NEXUS_DIR}/nexus.db
-    `);
+  if (clients.includes("codex")) {
+    codexMcpOk = addCodexMcp("global");
+    installAgentsMd("global");
   }
+
+  const lines: string[] = ["", "  ClaudeLink is ready (global install)!", "", "  What was set up:"];
+  if (clients.includes("claude")) {
+    lines.push(`    - Claude Code MCP: ${claudeMcpOk ? "registered globally" : "manual step printed above"}`);
+    lines.push("    - ~/.claude/CLAUDE.md: autonomous-mode instructions");
+  }
+  if (clients.includes("codex")) {
+    lines.push(`    - Codex CLI MCP: ${codexMcpOk ? "registered globally" : "manual step printed above"}`);
+    lines.push("    - ~/.codex/AGENTS.md: multi-agent instructions");
+  }
+  lines.push("");
+  lines.push(`  Data stored in: ${NEXUS_DIR}/nexus.db`);
+  console.log(lines.join("\n") + "\n");
 }
 
 function showHelp() {
@@ -195,8 +295,12 @@ function showHelp() {
   Usage: claudelink <command>
 
   Commands:
-    init                       Add ClaudeLink to .mcp.json in current project + CLAUDE.md
-    init --global              Add ClaudeLink globally + ~/.claude/CLAUDE.md
+    init                       Set up ClaudeLink for Claude Code in this project (.mcp.json + CLAUDE.md)
+    init --global              Set up ClaudeLink for Claude Code globally (~/.claude/CLAUDE.md)
+    init --codex               Set up ClaudeLink for Codex CLI in this project (AGENTS.md + Codex MCP snippet)
+    init --codex --global      Set up ClaudeLink for Codex CLI globally (~/.codex/AGENTS.md + codex mcp add)
+    init --both                Set up for Claude Code AND Codex CLI (project)
+    init --both --global       Set up for Claude Code AND Codex CLI (global)
     status                     Show registered agents and their status
     ui                         Launch the Command Center UI in your browser
     ui --stop                  Stop the Command Center UI
@@ -464,13 +568,22 @@ const command = args[0];
 printBanner();
 
 switch (command) {
-  case "init":
-    if (args.includes("--global")) {
-      initGlobal();
+  case "init": {
+    const isGlobal = args.includes("--global");
+    const wantBoth = args.includes("--both");
+    const wantCodex = args.includes("--codex");
+    const clients: Client[] = wantBoth
+      ? ["claude", "codex"]
+      : wantCodex
+        ? ["codex"]
+        : ["claude"];
+    if (isGlobal) {
+      initGlobal(clients);
     } else {
-      initProject();
+      initProject(clients);
     }
     break;
+  }
   case "status":
     showStatus();
     break;

@@ -8,7 +8,7 @@
 [![Built for Claude Code](https://img.shields.io/badge/Built%20for-Claude%20Code-a855f7.svg?style=flat-square)](https://claude.com/claude-code)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-f59e0b.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
-ClaudeLink is an [MCP](https://modelcontextprotocol.io/) server that turns multiple Claude Code instances into a **single coordinated team**. Open four terminals, give each one a role — reviewer, developer, tester, architect — and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away.
+ClaudeLink is an [MCP](https://modelcontextprotocol.io/) server that turns multiple AI coding agents (Claude Code, OpenAI Codex CLI, or any MCP-compatible client) into a **single coordinated team**. Open four terminals, give each one a role — reviewer, developer, tester, architect — and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away. Mix models freely: a Claude reviewer talking to a Codex developer is a fully supported pattern.
 
 You don't need to invent a multi-agent framework. You already have one.
 
@@ -192,26 +192,37 @@ Within a minute the reviewer's reply appears in terminal 2, the developer acts o
 npm install -g claudelink
 ```
 
-### 2. Add to Claude Code
+### 2. Add to your AI client
 
-**Global (recommended — works in every project):**
+**Claude Code (global, recommended):**
 ```bash
 claude mcp add --scope user claudelink -- claudelink-server
 ```
 
-**Per-Project (only this project):**
+**Codex CLI (global):**
 ```bash
-cd your-project
-npx claudelink init
+codex mcp add claudelink -- claudelink-server
 ```
 
-### 3. Restart Claude Code
+**Per-project (auto-detects which client):**
+```bash
+cd your-project
+npx claudelink init           # Claude Code: writes .mcp.json + CLAUDE.md
+npx claudelink init --codex   # Codex CLI: writes AGENTS.md + prints config snippet
+npx claudelink init --both    # both clients in the same project
+```
+
+### 3. Restart your terminals
 
 ClaudeLink tools appear automatically. Done.
 
+### Multi-model support
+
+ClaudeLink doesn't care which model is on the other end of an MCP connection. The MCP layer is open — any compliant client can register and participate. A Claude advisor can message a Codex developer and back, and the Command Center shows them as peers in the same mesh. The only Claude-Code-specific layer is the optional Stop hook (which gives instant turn-end pickup); Codex agents fall back to the auto-nudge scheduler's 5-minute cadence, which is fine for almost every workflow.
+
 ### Requirements
 - Node.js 18+
-- Claude Code CLI
+- An MCP-compatible client: Claude Code CLI or OpenAI Codex CLI
 - macOS or Linux (Windows works for messaging; auto-nudge requires tmux)
 
 ---
