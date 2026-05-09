@@ -6,15 +6,19 @@
 
 ---
 
-## Current status: v1.3 multi-model spans Claude/Codex/Gemini/Goose; README rewritten around model-agnostic positioning; v1.2 multi-machine design approved (Phase 0); v1.1.2 npm publish still pending OTP
+## Current status: v1.3.0 LIVE on npm; v1.3.1 fix staged locally (Codex/iTerm2 keystroke bug); v1.4 multi-machine design approved (Phase 0)
 
 **Open items in priority order:**
 
-1. **v1.3 multi-model (4 CLIs supported).** Claude Code, Codex CLI, Gemini CLI, Goose all have `--<cli>` flags + `--all` shortcut + `--global` flow. Smoke-tested live on user's machine: Claude Code (working since v1.0), Codex CLI verified registered + sending/receiving, Gemini CLI registered (10-15s first-token latency observed but Gemini-side, not ours). Goose code paths smoke-tested in temp dirs only — user has Goose installed?? not verified. Snapshot of commits below.
-2. **README rewrite.** Major reframing pass: lead positioning now model-agnostic, new "Compatible AI clients" section with table, new "Heterogeneous workflows" section, new "Local-first security" subsection, MCP-config-files-per-CLI table in Configuration, FAQ updated to mention v1.2 multi-machine design and how to add an arbitrary MCP-compatible CLI. Keywords block expanded for SEO across all four CLIs.
-3. **v1.2 multi-machine design approved.** Full design doc at `docs/multi-machine-design.md`, committed `d4bb0ee` and pushed. Phase 0 sign-off complete. Phase 1 build cleared to start when the user has the M5 set up.
-4. **Favicon shipped.** Bold lavender L with mint node-cap dot. Commit `8ad9812`, pushed.
-5. **v1.1.2 npm publish.** Still pending interactive 2FA OTP. When the user does the publish dance, bump to `v1.3.0` (new minor — multi-model is the headline feature) and publish in one shot. Includes README rewrite + Codex/Gemini/Goose support + favicon + multi-machine design doc.
+1. **v1.3.1 publish + push (next session pickup).** Local has 2 unpushed commits + tag `v1.3.1`:
+   - `4ca0ffa` — fix(scheduler): two-write iTerm2 dispatch (text + delay 0.05 + standalone CR)
+   - `d9b95a4` — Release v1.3.1 commit (just package.json bump)
+   - To complete: `npm publish` (interactive OTP), then `git push origin main && git push origin v1.3.1`
+2. **v1.4 multi-machine** *(was v1.2 in design doc; renumbered because v1.3 multi-model shipped first; design doc still refers to it as v1.2 — fix on next pass).* Phase 1 (NexusBackend interface extraction) cleared to start. Pure local refactor, doesn't need user's M5.
+3. **v1.3.1 root-cause notes** *(keep these)*. iTerm2's `write text` with multi-character content goes through bracketed-paste path; the bytes arrive at the receiving process as a PASTE, not keystrokes. CLIs whose TUI reads keyboard events (notably Codex) see embedded CR/LF as "characters within pasted content" rather than Enter. Claude Code and Gemini CLI were lenient enough to accept paste-mode submission, masking the bug in v1.3.0; Codex was strict and exposed it. Fix: split into two write-text calls — text first without newline, 50ms delay, then a standalone CR write without newline. Iterm2 sends the standalone single-byte CR as a real keystroke. Verified end-to-end on Codex (10s round-trip) and Gemini (14s round-trip).
+4. **v1.3.1 also fixed a Codex registration gap.** `claudelink-server` registered with `terminal_app=NULL` because Codex CLI strips env (TERM_PROGRAM) when spawning MCP children. Manual SQL patch unblocked the user (`UPDATE agents SET terminal_app='iterm2' WHERE role='openai-auditor';`). The proper fix is to add a tty-ownership-via-osascript fallback in the registration auto-detect (`src/index.ts`), tried after the env-var detection fails. Not in v1.3.1 — the user wanted the keystroke fix shipped fast. Track for v1.4 or a v1.3.2.
+5. **Founder playbook (gitignored).** Personal notes at `docs/founder-playbook.md` (excluded from git). Promotion strategy + launch sequence + repo polish checklist. Not in the public repo.
+6. **Cleanup**: transient `claudelink-keystroke-test` agent (id `5875e1c2-…`) was registered during the v1.3.1 verification. User can clean via the Command Center's Heal orphans button after the MCP session disconnects.
 
 ## What was added on 2026-05-08
 
