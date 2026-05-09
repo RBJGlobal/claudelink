@@ -6,14 +6,15 @@
 
 ---
 
-## Current status: v1.3.0 LIVE on npm; v1.3.1 fix staged locally (Codex/iTerm2 keystroke bug); v1.4 multi-machine design approved (Phase 0)
+## Current status: v1.3.1 LIVE on npm + GitHub; v1.4 multi-machine PAUSED for ~1 week of user soak testing
+
+**On pause until ~2026-05-16:** user is taking a few days to soak-test v1.3.1 in real use before starting v1.4 multi-machine. Reasoning: multi-machine is architecturally large (touches local networking + spoke daemon + schema v3), and last night surfaced two "basic" bugs (Codex env-strip on registration, iTerm2 bracketed-paste vs Enter-key dispatch) that only came out through real use. Better to find any remaining v1.3.1 issues on a stable base than to compound them with v1.4 work in flight.
 
 **Open items in priority order:**
 
-1. **v1.3.1 publish + push (next session pickup).** Local has 2 unpushed commits + tag `v1.3.1`:
-   - `4ca0ffa` — fix(scheduler): two-write iTerm2 dispatch (text + delay 0.05 + standalone CR)
-   - `d9b95a4` — Release v1.3.1 commit (just package.json bump)
-   - To complete: `npm publish` (interactive OTP), then `git push origin main && git push origin v1.3.1`
+0. **Wait for user.** Don't propose starting v1.4 unprompted. When the user comes back and is ready, Phase 1 (NexusBackend interface extraction) is cleared to start.
+
+1. **v1.3.1 LIVE.** `npm view claudelink version` → `1.3.1`. GitHub tag `v1.3.1` at `b76a336`. Multi-CLI mesh + Codex keystroke fix shipped.
 2. **v1.4 multi-machine** *(was v1.2 in design doc; renumbered because v1.3 multi-model shipped first; design doc still refers to it as v1.2 — fix on next pass).* Phase 1 (NexusBackend interface extraction) cleared to start. Pure local refactor, doesn't need user's M5.
 3. **v1.3.1 root-cause notes** *(keep these)*. iTerm2's `write text` with multi-character content goes through bracketed-paste path; the bytes arrive at the receiving process as a PASTE, not keystrokes. CLIs whose TUI reads keyboard events (notably Codex) see embedded CR/LF as "characters within pasted content" rather than Enter. Claude Code and Gemini CLI were lenient enough to accept paste-mode submission, masking the bug in v1.3.0; Codex was strict and exposed it. Fix: split into two write-text calls — text first without newline, 50ms delay, then a standalone CR write without newline. Iterm2 sends the standalone single-byte CR as a real keystroke. Verified end-to-end on Codex (10s round-trip) and Gemini (14s round-trip).
 4. **v1.3.1 also fixed a Codex registration gap.** `claudelink-server` registered with `terminal_app=NULL` because Codex CLI strips env (TERM_PROGRAM) when spawning MCP children. Manual SQL patch unblocked the user (`UPDATE agents SET terminal_app='iterm2' WHERE role='openai-auditor';`). The proper fix is to add a tty-ownership-via-osascript fallback in the registration auto-detect (`src/index.ts`), tried after the env-var detection fails. Not in v1.3.1 — the user wanted the keystroke fix shipped fast. Track for v1.4 or a v1.3.2.
