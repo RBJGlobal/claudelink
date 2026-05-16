@@ -5,7 +5,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import { NexusDB } from "./db.js";
 import { launchUIIfNeeded } from "./ui-launcher.js";
 
@@ -31,7 +31,38 @@ function detectTty(): string | null {
   }
 }
 
-function detectTerminalApp(): string | null {
+function detectTerminalAppByTty(tty: string): string | null {
+  // Fallback when env-var detection fails. Asks iTerm2 directly via
+  // AppleScript whether any session owns this tty. Catches the Codex CLI
+  // case: Codex strips environment variables (TERM_PROGRAM included) when
+  // spawning MCP children, so the env-based path returns null even though
+  // the agent is clearly running inside iTerm2.
+  try {
+    const script = `tell application "iTerm2"
+      repeat with w in windows
+        repeat with t in tabs of w
+          repeat with s in sessions of t
+            if (tty of s) is "${tty.replace(/"/g, '\\"')}" then return "iterm2"
+          end repeat
+        end repeat
+      end repeat
+    end tell
+    return ""`;
+    const result = execFileSync("osascript", ["-e", script], {
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf-8",
+    }).trim();
+    return result === "iterm2" ? "iterm2" : null;
+  } catch {
+    // osascript not installed (non-mac), iTerm2 not running, timeout —
+    // all benign. Registration continues with terminal_app=null and the
+    // user can patch later or restart with a CLI that doesn't strip env.
+    return null;
+  }
+}
+
+function detectTerminalApp(tty: string | null): string | null {
   if (process.env.TMUX) return "tmux";
   const tp = process.env.TERM_PROGRAM;
   if (tp === "iTerm.app") return "iterm2";
@@ -39,6 +70,12 @@ function detectTerminalApp(): string | null {
   if (tp === "WezTerm") return "wezterm";
   if (tp === "ghostty") return "ghostty";
   if (tp) return tp.toLowerCase();
+  // Env-based detection returned null. Try asking iTerm2 directly if we
+  // have a tty — handles CLIs that strip env on MCP child spawn.
+  if (tty) {
+    const byTty = detectTerminalAppByTty(tty);
+    if (byTty) return byTty;
+  }
   return null;
 }
 
@@ -203,9 +240,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const autonomousReply =
           args?.autonomousReply === undefined ? true : Boolean(args.autonomousReply);
 
+        const tty = detectTty();
         currentAgentId = db.registerAgent(role, description, process.pid, {
-          tty: detectTty(),
-          terminalApp: detectTerminalApp(),
+          tty,
+          terminalApp: detectTerminalApp(tty),
           paneId: detectPaneId(),
           autonomousReply,
         });
