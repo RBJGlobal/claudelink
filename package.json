@@ -36,11 +36,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jaysidd/claudelink.git"
+    "url": "git+https://github.com/RBJGlobal/claudelink.git"
   },
-  "homepage": "https://github.com/jaysidd/claudelink",
+  "homepage": "https://github.com/RBJGlobal/claudelink",
   "bugs": {
-    "url": "https://github.com/jaysidd/claudelink/issues"
+    "url": "https://github.com/RBJGlobal/claudelink/issues"
   },
   "engines": {
     "node": ">=18.0.0"
