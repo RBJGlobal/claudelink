@@ -48,30 +48,43 @@ const LOG_PATH = path.join(NEXUS_DIR, "recovery-watcher.log");
 // output from prose that merely DISCUSSES rate-limiting (agent conversations,
 // docs, log inspection). Without this, the watcher false-fires whenever any
 // agent talks about rate-limiting.
+// Note: gap classes use [\s\S]{0,N}? (lazy any-char including newline)
+// rather than [^\n]*, because iTerm2's `contents of session` returns
+// soft-wrapped errors with real \n at the wrap. A long error like
+// `API Error: 529 {"type":"error","error":{"type":"overloaded_error",...}}`
+// arrives in scrollback as multiple lines; [^\n]* would never bridge the
+// gap and the pattern wouldn't fire. The tight upper bound (60-200 chars)
+// keeps the false-positive surface narrow — we still need an error
+// prefix on the same VISUAL block as the keyword, just not the same
+// pre-wrap line.
 const ERROR_PATTERNS: RegExp[] = [
   // Claude Code's full rate-limit error line — distinctive enough to be
   // its own pattern. Still subject to position filter below.
   /API\s*Error:\s*Server is temporarily limiting requests/i,
 
-  // Claude Code other API errors — require "API Error:" prefix in the
-  // same line as the keyword.
-  /API\s*Error:[^\n]*\brate[ _-]?limit/i,
-  /API\s*Error:[^\n]*\boverload/i,
-  /API\s*Error:[^\n]*\b(529|503|429)\b/i,
-  /API\s*Error:[^\n]*\b(rate_limit_error|overloaded_error)\b/i,
+  // Claude Code other API errors — require "API Error:" prefix near the
+  // keyword (with bounded any-char gap to allow soft-wrap).
+  /API\s*Error:[\s\S]{0,200}?\brate[ _-]?limit/i,
+  /API\s*Error:[\s\S]{0,200}?\boverload/i,
+  /API\s*Error:[\s\S]{0,200}?\b(529|503|429)\b/i,
+  /API\s*Error:[\s\S]{0,200}?\b(rate_limit_error|overloaded_error)\b/i,
 
-  // OpenAI/Codex CLI shapes — require an "error" prefix in the same line.
-  /\bOpenAI\s*API\s*(error|exception):[^\n]*\b(rate_limit|overload)/i,
-  /\berror\b[^\n]{0,60}\brate_limit_exceeded\b/i,
+  // OpenAI/Codex CLI shapes — require an "error" prefix near the keyword.
+  /\bOpenAI\s*API\s*(error|exception):[\s\S]{0,200}?\b(rate_limit|overload)/i,
+  /\berror\b[\s\S]{0,60}?\brate_limit_exceeded\b/i,
 
-  // Bare HTTP status lines (still distinctive because they include the
+  // Bare HTTP status lines (distinctive because they include the
   // canonical status text, which prose-mentions rarely include verbatim).
   /\b(429|529)\s+Too Many Requests\b/i,
   /\b503\s+Service Unavailable\b/i,
 
-  // Generic CLI-error safety net — "Error" or "Error:" prefix on the
-  // same line as the rate-limit token, with a tight intra-line cap.
-  /\bError:?\b[^\n]{0,80}\b(rate[ _-]?limited|rate_limit_error|overloaded_error|request was throttled)\b/i,
+  // Generic CLI-error safety net — "Error" / "Error:" near the rate-limit
+  // token. Requires the Error token to be at the START OF A VISIBLE LINE
+  // (optionally with the Claude Code `⎿` tool-output glyph prefix), so
+  // prose mentions of the same phrase in mid-conversation don't trigger.
+  // Without the line-start anchor, agents writing about ClaudeLink in
+  // their own work (e.g. the build-log writer) hit this as a false positive.
+  /(?:^|\n)[\s│⎿]*Error:?\b[\s\S]{0,80}?\b(rate[ _-]?limited|rate_limit_error|overloaded_error|request was throttled)\b/i,
 ];
 
 // Capture only the last N characters of scrollback. Errors that paused
@@ -169,35 +182,61 @@ function captureScrollback(c: NudgeCandidate): string | null {
   }
 }
 
-// Hash the matched error context to a short signature. We hash the matched
-// substring plus a small surrounding window so de-dup compares semantic
-// "same error" rather than identical byte-for-byte scrollback (which would
-// always differ as the terminal repaints).
+// Hash the matched error context to a short signature. We hash the
+// matched substring plus a small surrounding window, BUT first
+// canonicalize per-request volatile bytes — request IDs, retry counters,
+// timestamps — so de-dup compares semantic "same error" rather than
+// byte-identical scrollback. Without canonicalization, every tick on a
+// genuinely-still-stuck agent produced a fresh signature because Claude
+// Code's retry text included a fresh request ID each time; the cooldown
+// was masking the de-dup failure by accident.
 function computeSignature(scrollback: string, match: RegExpMatchArray): string {
   const start = Math.max(0, (match.index ?? 0) - 32);
   const end = Math.min(scrollback.length, (match.index ?? 0) + match[0].length + 32);
   const window = scrollback.slice(start, end);
-  return crypto.createHash("sha1").update(window).digest("hex").slice(0, 16);
+  const canon = window
+    .toLowerCase()
+    .replace(/\b[0-9a-f]{8,}\b/gi, "#") // request IDs, hex tokens (≥8 chars)
+    .replace(/\d+/g, "#")                // numbers (retry counters, status codes, timestamps)
+    .replace(/\s+/g, " ")                // collapse whitespace so re-wrap doesn't shift sig
+    .trim();
+  return crypto.createHash("sha1").update(canon).digest("hex").slice(0, 16);
 }
 
-// Match scrollback against the known patterns. Returns the first match's
-// signature, or null if no pattern matched OR the match is too far from
-// the end of the buffer (likely scrolled-up or mid-conversation prose).
+// Match scrollback against the known patterns. Returns the match CLOSEST
+// to the end of the buffer (across all patterns and all occurrences), or
+// null if nothing matched within MAX_DISTANCE_FROM_END.
+//
+// IMPORTANT: this iterates ALL matches across ALL patterns, not just the
+// first match per pattern. v1.4.0/v1.4.1 used `scrollback.match(re)`
+// which returns only the first occurrence — when Claude Code rendered
+// the same error twice (initial failure + retry), the matcher locked
+// onto the first (out-of-range) copy and silently skipped, leaving real
+// stuck terminals un-nudged. Iterating all matches and picking the
+// nearest-to-end is what guarantees a stuck error gets caught.
 function detectError(scrollback: string): { pattern: RegExp; signature: string } | null {
+  let best: { match: RegExpExecArray; pattern: RegExp; distanceFromEnd: number } | null = null;
   for (const re of ERROR_PATTERNS) {
-    const m = scrollback.match(re);
-    if (!m) continue;
-    const matchEnd = (m.index ?? 0) + m[0].length;
-    const distanceFromEnd = scrollback.length - matchEnd;
-    if (distanceFromEnd > MAX_DISTANCE_FROM_END) {
-      // Match exists but is too far from the bottom — almost certainly
-      // historical scrollback or mid-conversation prose, not the current
-      // stuck state. Skip and try the next pattern.
-      continue;
+    // Force a global flag so exec() iterates rather than locking to first.
+    const globalRe = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+    let m: RegExpExecArray | null;
+    while ((m = globalRe.exec(scrollback)) !== null) {
+      const matchEnd = m.index + m[0].length;
+      const distance = scrollback.length - matchEnd;
+      if (distance > MAX_DISTANCE_FROM_END) continue;
+      if (best === null || distance < best.distanceFromEnd) {
+        best = { match: m, pattern: re, distanceFromEnd: distance };
+      }
+      // Guard against pathological zero-width matches advancing the
+      // regex engine's lastIndex.
+      if (m.index === globalRe.lastIndex) globalRe.lastIndex++;
     }
-    return { pattern: re, signature: computeSignature(scrollback, m) };
   }
-  return null;
+  if (!best) return null;
+  return {
+    pattern: best.pattern,
+    signature: computeSignature(scrollback, best.match as unknown as RegExpMatchArray),
+  };
 }
 
 function fireDesktopNotification(role: string, message: string): void {
@@ -239,6 +278,14 @@ export interface RecoveryWatcherHandle {
 export function startRecoveryWatcher(): RecoveryWatcherHandle {
   let db: Database.Database | null = null;
   let timer: NodeJS.Timeout | null = null;
+  // Re-entrancy guard. captureScrollback() uses execFileSync with a 3s
+  // timeout; on a 14-agent fleet under iTerm2-unresponsive conditions
+  // (osascript ETIMEDOUT) a single tick can take 40+ seconds. The
+  // setInterval doesn't know or care, and would happily fire the next
+  // tick on top, blocking the event loop further. The flag is checked at
+  // the head of every tick — if a previous tick is still in flight, the
+  // new one logs and returns immediately.
+  let tickInProgress = false;
   const state = new Map<string, AgentState>();
 
   const openDb = (): Database.Database => {
@@ -257,8 +304,23 @@ export function startRecoveryWatcher(): RecoveryWatcherHandle {
 
   const tick = (): { checked: number; fired: number; suppressed: number; escalated: number } => {
     const summary = { checked: 0, fired: 0, suppressed: 0, escalated: 0 };
+    if (tickInProgress) {
+      logLine(`skip-tick: previous tick still in flight`);
+      return summary;
+    }
+    tickInProgress = true;
+    try {
+      return runTickBody(summary);
+    } finally {
+      tickInProgress = false;
+    }
+  };
+
+  const runTickBody = (summary: { checked: number; fired: number; suppressed: number; escalated: number }) => {
     const settings = readRecoveryWatcherSettings();
-    if (!settings.enabled) return summary;
+    if (!settings.enabled) {
+      return summary;
+    }
 
     let candidates: NudgeCandidate[];
     try {
@@ -333,6 +395,7 @@ export function startRecoveryWatcher(): RecoveryWatcherHandle {
         );
       }
     }
+    tickInProgress = false;
     return summary;
   };
 
