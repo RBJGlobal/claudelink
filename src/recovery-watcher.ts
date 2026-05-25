@@ -41,24 +41,50 @@ const LOG_PATH = path.join(NEXUS_DIR, "recovery-watcher.log");
 
 // Patterns drawn from observed errors across Claude Code, Codex, Gemini.
 // MVP is hardcoded; later releases can make this configurable per-agent.
-// Each regex matches the error string as it appears in a terminal's
-// rendered output (no ANSI assumptions — captures match the visible text).
+//
+// Design rule: every pattern requires CLI-error context (an "API Error:",
+// "Error:", or distinctive status-line prefix) on the same visible line as
+// the rate-limit/overload keyword. This is what separates real CLI error
+// output from prose that merely DISCUSSES rate-limiting (agent conversations,
+// docs, log inspection). Without this, the watcher false-fires whenever any
+// agent talks about rate-limiting.
 const ERROR_PATTERNS: RegExp[] = [
-  /API Error: Server is temporarily limiting requests/i,
-  /\brate[ _-]?limited\b/i,
-  /\brate_limit_error\b/i,
-  /\boverloaded_error\b/i,
-  /\b529\s+Too\s+Many\s+Requests\b/i,
-  /\b503\s+Service\s+Unavailable\b/i,
-  /\brequest was throttled\b/i,
-  // Anthropic and OpenAI both surface "overloaded" in various shapes
-  /\boverloaded\b.*\bretry\b/i,
+  // Claude Code's full rate-limit error line — distinctive enough to be
+  // its own pattern. Still subject to position filter below.
+  /API\s*Error:\s*Server is temporarily limiting requests/i,
+
+  // Claude Code other API errors — require "API Error:" prefix in the
+  // same line as the keyword.
+  /API\s*Error:[^\n]*\brate[ _-]?limit/i,
+  /API\s*Error:[^\n]*\boverload/i,
+  /API\s*Error:[^\n]*\b(529|503|429)\b/i,
+  /API\s*Error:[^\n]*\b(rate_limit_error|overloaded_error)\b/i,
+
+  // OpenAI/Codex CLI shapes — require an "error" prefix in the same line.
+  /\bOpenAI\s*API\s*(error|exception):[^\n]*\b(rate_limit|overload)/i,
+  /\berror\b[^\n]{0,60}\brate_limit_exceeded\b/i,
+
+  // Bare HTTP status lines (still distinctive because they include the
+  // canonical status text, which prose-mentions rarely include verbatim).
+  /\b(429|529)\s+Too Many Requests\b/i,
+  /\b503\s+Service Unavailable\b/i,
+
+  // Generic CLI-error safety net — "Error" or "Error:" prefix on the
+  // same line as the rate-limit token, with a tight intra-line cap.
+  /\bError:?\b[^\n]{0,80}\b(rate[ _-]?limited|rate_limit_error|overloaded_error|request was throttled)\b/i,
 ];
 
-// Capture only the last N characters of scrollback. Error messages
-// typically sit at the bottom; reading the entire buffer is wasteful and
-// slow for long sessions.
-const SCROLLBACK_TAIL_CHARS = 4000;
+// Capture only the last N characters of scrollback. Errors that paused
+// execution sit at the bottom of the visible buffer. Reading more wastes
+// CPU and increases the false-positive surface.
+const SCROLLBACK_TAIL_CHARS = 1500;
+
+// Matched error text must be within this many characters of the END of
+// the captured scrollback. When a CLI is genuinely stuck, the error is
+// the LAST thing on screen above the prompt. When an agent is merely
+// discussing an error in conversation, more text follows the mention,
+// pushing it away from the end. This is the key false-positive guard.
+const MAX_DISTANCE_FROM_END = 400;
 
 interface AgentState {
   lastSignature: string | null;
@@ -146,13 +172,21 @@ function computeSignature(scrollback: string, match: RegExpMatchArray): string {
 }
 
 // Match scrollback against the known patterns. Returns the first match's
-// signature, or null if no pattern matched.
+// signature, or null if no pattern matched OR the match is too far from
+// the end of the buffer (likely scrolled-up or mid-conversation prose).
 function detectError(scrollback: string): { pattern: RegExp; signature: string } | null {
   for (const re of ERROR_PATTERNS) {
     const m = scrollback.match(re);
-    if (m) {
-      return { pattern: re, signature: computeSignature(scrollback, m) };
+    if (!m) continue;
+    const matchEnd = (m.index ?? 0) + m[0].length;
+    const distanceFromEnd = scrollback.length - matchEnd;
+    if (distanceFromEnd > MAX_DISTANCE_FROM_END) {
+      // Match exists but is too far from the bottom — almost certainly
+      // historical scrollback or mid-conversation prose, not the current
+      // stuck state. Skip and try the next pattern.
+      continue;
     }
+    return { pattern: re, signature: computeSignature(scrollback, m) };
   }
   return null;
 }
