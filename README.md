@@ -328,6 +328,7 @@ The Command Center is a local web UI at `http://127.0.0.1:7878` — a live conso
 | **Registered agents** | Role, status, **per-agent Auto-reply toggle**, sent/received counts, last-seen. |
 | **Health** | Total agents, unread/total messages, bulletin entries, orphan blockers, FK violations. **Heal orphans** cleans dead-agent tail rows in one transaction. |
 | **Auto-nudge** | Global on/off + tick interval (1–120 min). Scheduler only fires for terminals that *actually have* unread mail — no wasted Claude turns. |
+| **Recovery Watcher** *(v1.4.0+)* | Detects Anthropic API rate-limit / overload errors in agent terminals and types a recovery prompt automatically. Configurable poll interval, cooldown, and escalate-to-desktop-notification threshold. See [Recovery Watcher](#3-recovery-watcher-api-error-auto-recovery) below. |
 | **Recent messages** | Live feed of the last several messages across all agents, with priority and unread badges. |
 
 The page auto-refreshes every 2 seconds. **Kill all servers** in the header drops the entire mesh in one click.
@@ -424,6 +425,74 @@ The hook emits `{"decision": "block", "reason": "..."}` directing the Claude age
 Set any to `0` to disable. Decisions log to `~/.claudelink/auto-fire.log`.
 
 > **Honest note on Claude's safety boundary:** Claude Code's prompt-injection defense correctly flags external content steering outbound tool calls. The Stop hook reliably triggers an autonomous inbox read; Claude may decline to send the outbound reply autonomously when the reply would be unrelated to the user's most recent prompt. This is responsible safety behavior, not a bug. **The auto-nudge scheduler avoids this entirely** because the keystroke path is indistinguishable from the user typing by hand.
+
+### 3. Recovery Watcher (API-error auto-recovery)
+
+*New in v1.4.0.* Detects when an agent's terminal has been halted by an Anthropic (or other LLM provider) API error and types a recovery prompt automatically, so you don't come back from being away to find a fleet of agents that have been stopped for hours.
+
+#### The problem this solves
+
+When the Anthropic API rate-limits or overloads, Claude Code surfaces an error like this and halts the agent's turn mid-flight:
+
+```
+API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited
+```
+
+Other shapes you'll see from the same family:
+
+| Surface | Meaning |
+|---|---|
+| `API Error: Server is temporarily limiting requests · Rate limited` | Anthropic short-window rate limit (most common at night) |
+| `API Error: 429 Too Many Requests` | Per-token-bucket rate limit hit |
+| `API Error: 529 Too Many Requests` | Anthropic-side overload (capacity, not your account) |
+| `API Error: 503 Service Unavailable` | Upstream unavailable |
+| `API Error: rate_limit_error` | Programmatic rate-limit error class |
+| `API Error: overloaded_error` | Programmatic overload error class |
+
+When this happens, the agent **cannot recover on its own** — the turn died with an error, and the CLI sits at a prompt waiting for human input. Without ClaudeLink, you have to walk to each affected terminal, sometimes ask another agent what the stuck one was doing, and manually type a continuation. If you're asleep or away for the weekend, the agents are stopped until you come back.
+
+#### What Recovery Watcher does
+
+```mermaid
+flowchart LR
+    TICK{{"⏱️ Poll every N sec<br/>(default 60s)"}} --> CAP["Capture last 1500 chars<br/>of each agent's terminal<br/>(iTerm2 osascript /<br/>tmux capture-pane)"]
+    CAP --> MATCH{"Match against<br/>error patterns?"}
+    MATCH -->|No| WAIT["Skip — agent is fine"]
+    MATCH -->|Yes| POS{"Match within<br/>last 400 chars?"}
+    POS -->|No| DISC["Skip — likely prose<br/>discussion, not<br/>actual error"]
+    POS -->|Yes| DEDUP{"New error<br/>signature?"}
+    DEDUP -->|No, within cooldown| QUIET["Skip — already nudged<br/>this error"]
+    DEDUP -->|Yes| ESC{"Consecutive fires<br/>≥ escalateAfter?"}
+    ESC -->|Yes| NOTIFY["Desktop notification<br/>(API is genuinely down,<br/>nudging won't help)"]
+    ESC -->|No| FIRE["✅ Type recovery message<br/>into terminal<br/>(default: 'check messages<br/>and continue with your<br/>current assignment')"]
+```
+
+When a recovery prompt fires, the receiving CLI treats it as a normal user prompt, the agent calls `read_inbox` and resumes — the same path that already works for routine auto-nudge.
+
+![Recovery Watcher in the Command Center](docs/assets/recovery-watcher.png)
+
+#### Configuration
+
+Configurable directly from the Command Center (Recovery Watcher panel) or via `~/.claudelink/recovery-watcher.json`:
+
+| Setting | Default | What it controls |
+|---|---|---|
+| `enabled` | `false` | Opt-in. Defaults off so existing installs see zero behavior change. |
+| `intervalSec` | `60` | How often to poll each terminal. Clamped to [15, 600]. |
+| `cooldownMin` | `5` | Minimum gap between recovery fires for the same agent + same error. Clamped to [1, 60]. |
+| `escalateAfter` | `3` | After N consecutive fires without the error clearing, stop nudging and send a macOS desktop notification instead. Clamped to [1, 20]. |
+| `recoveryMessage` | `"check messages and continue with your current assignment"` | Exact text typed into the stuck terminal. |
+
+Audit log at `~/.claudelink/recovery-watcher.log` — every detection, fire, suppression, and escalation is recorded with the matched pattern and signature.
+
+#### How false positives are avoided
+
+Two-part guard built into the pattern matcher:
+
+1. **Context-aware patterns.** Patterns require an `API Error:`, `Error:`, or `OpenAI API error:` prefix on the same line as the rate-limit/overload keyword. Bare words alone don't match — so agents merely *discussing* rate-limiting in conversation don't trigger false fires.
+2. **Position filter.** The matched text must occur within the last 400 characters of the captured scrollback. Real CLI errors that paused execution sit at the bottom of the visible buffer, just above the prompt cursor. If the error string is buried mid-conversation with prose continuing after it, the match is rejected as "talked about, not actually happening."
+
+The two guards together kill the noise: the watcher fires on real stuck agents, stays silent on agents that simply *mention* the topic.
 
 ### Per-agent opt-out
 
