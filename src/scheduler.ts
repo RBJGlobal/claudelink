@@ -30,7 +30,7 @@ const LOG_PATH = path.join(NEXUS_DIR, "scheduler.log");
 
 const NUDGE_TEXT = "check for updates";
 
-interface NudgeCandidate {
+export interface NudgeCandidate {
   id: string;
   role: string;
   tty: string;
@@ -60,7 +60,7 @@ function escapeForAppleScript(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function injectKeystroke(c: NudgeCandidate, text: string): "ok" | "skip" | "fail" {
+export function injectKeystroke(c: NudgeCandidate, text: string): "ok" | "skip" | "fail" {
   const app = (c.terminal_app || "").toLowerCase();
   try {
     if (app === "tmux") {

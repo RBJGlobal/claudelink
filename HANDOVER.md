@@ -6,7 +6,14 @@
 
 ---
 
-## Current status: v1.3.1 LIVE on npm + GitHub; v1.4 multi-machine PAUSED for ~1 week of user soak testing
+## Current status: v1.3.2 LIVE on npm (Codex env-strip fix); v1.4.0 Recovery Watcher staged locally; multi-machine renumbered to v1.5
+
+**Latest priority work:**
+
+- **v1.4.0 Recovery Watcher (MVP, staged locally, about to publish)** — polls each registered agent's terminal scrollback every 60s for API-error patterns (rate limit, overload, 5xx), types "check messages and continue with your current assignment" on a NEW occurrence. Per-agent cooldown (5 min default) plus escalate-after-N-fires that switches to desktop notification when nudging isn't helping. Built because Jay was hitting nightly Anthropic rate-limits that halt agent turns; he had been typing the recovery nudge by hand.
+- Files: `src/recovery-watcher.ts`, `src/recovery-watcher-settings.ts`, edits to `src/scheduler.ts` (exported `injectKeystroke` + `NudgeCandidate` for reuse) and `src/ui-server.ts` (lifecycle + GET/POST `/api/recovery-watcher` + Command Center panel).
+- Defaults: enabled=false (opt-in). Settings at `~/.claudelink/recovery-watcher.json`. Audit log at `~/.claudelink/recovery-watcher.log`.
+- Multi-machine renumbered from v1.4 → **v1.5** because Recovery Watcher was higher-pain and could ship faster.
 
 **On pause until ~2026-05-16:** user is taking a few days to soak-test v1.3.1 in real use before starting v1.4 multi-machine. Reasoning: multi-machine is architecturally large (touches local networking + spoke daemon + schema v3), and last night surfaced two "basic" bugs (Codex env-strip on registration, iTerm2 bracketed-paste vs Enter-key dispatch) that only came out through real use. Better to find any remaining v1.3.1 issues on a stable base than to compound them with v1.4 work in flight.
 

@@ -6,6 +6,14 @@ import { execFileSync } from "child_process";
 import Database from "better-sqlite3";
 import { startScheduler, SchedulerHandle } from "./scheduler.js";
 import {
+  startRecoveryWatcher,
+  RecoveryWatcherHandle,
+} from "./recovery-watcher.js";
+import {
+  readRecoveryWatcherSettings,
+  writeRecoveryWatcherSettings,
+} from "./recovery-watcher-settings.js";
+import {
   readSchedulerSettings,
   writeSchedulerSettings,
 } from "./scheduler-settings.js";
@@ -411,6 +419,40 @@ const HTML = String.raw`<!doctype html>
   </section>
 
   <section class="panel full">
+    <h2>Recovery Watcher</h2>
+    <div class="body">
+      <div class="nudge-controls">
+        <label class="nudge-toggle">
+          <input type="checkbox" id="rw-enabled" />
+          <span id="rw-enabled-label">Off</span>
+        </label>
+        <label class="nudge-interval">
+          Poll every:
+          <input type="number" id="rw-interval" min="15" max="600" step="15" />
+          <span>sec</span>
+        </label>
+        <label class="nudge-interval">
+          Cooldown:
+          <input type="number" id="rw-cooldown" min="1" max="60" step="1" />
+          <span>min</span>
+        </label>
+        <label class="nudge-interval">
+          Escalate after:
+          <input type="number" id="rw-escalate" min="1" max="20" step="1" />
+          <span>fires</span>
+        </label>
+        <span id="rw-status" class="nudge-status"></span>
+      </div>
+      <p class="nudge-hint">
+        Watches each agent's terminal scrollback for API rate-limit and overload errors. On a NEW detection, types your recovery message into that terminal so the agent can resume. After N consecutive fires the watcher escalates to a desktop notification instead — if the API is genuinely down, nudging won't help.
+      </p>
+      <p class="nudge-hint">
+        Recovery message: <span class="mono" id="rw-message">—</span>
+      </p>
+    </div>
+  </section>
+
+  <section class="panel full">
     <h2>Recent messages <span class="count" id="msg-count">0</span></h2>
     <div class="body" id="msg-body"></div>
   </section>
@@ -690,12 +732,54 @@ async function saveNudge() {
 $("nudge-enabled").addEventListener("change", saveNudge);
 $("nudge-interval").addEventListener("change", saveNudge);
 loadNudge();
+
+// --- Recovery Watcher controls ---
+async function loadRecoveryWatcher() {
+  try {
+    const s = await api("/api/recovery-watcher", "GET");
+    $("rw-enabled").checked = !!s.enabled;
+    $("rw-enabled-label").textContent = s.enabled ? "On" : "Off";
+    $("rw-interval").value = s.intervalSec;
+    $("rw-cooldown").value = s.cooldownMin;
+    $("rw-escalate").value = s.escalateAfter;
+    $("rw-message").textContent = s.recoveryMessage;
+  } catch (e) {
+    if (!e.disconnected) toast("Failed to load recovery-watcher settings: " + e.message, "error");
+  }
+}
+async function saveRecoveryWatcher() {
+  const enabled = $("rw-enabled").checked;
+  const intervalSec = Math.max(15, Math.min(600, parseInt($("rw-interval").value, 10) || 60));
+  const cooldownMin = Math.max(1, Math.min(60, parseInt($("rw-cooldown").value, 10) || 5));
+  const escalateAfter = Math.max(1, Math.min(20, parseInt($("rw-escalate").value, 10) || 3));
+  $("rw-interval").value = intervalSec;
+  $("rw-cooldown").value = cooldownMin;
+  $("rw-escalate").value = escalateAfter;
+  try {
+    const s = await api("/api/recovery-watcher", "POST", {
+      enabled, intervalSec, cooldownMin, escalateAfter,
+    });
+    $("rw-enabled-label").textContent = s.enabled ? "On" : "Off";
+    const status = $("rw-status");
+    status.textContent = "saved";
+    status.classList.add("show");
+    setTimeout(() => status.classList.remove("show"), 1500);
+  } catch (e) {
+    toast("Failed to save: " + e.message, "error");
+  }
+}
+$("rw-enabled").addEventListener("change", saveRecoveryWatcher);
+$("rw-interval").addEventListener("change", saveRecoveryWatcher);
+$("rw-cooldown").addEventListener("change", saveRecoveryWatcher);
+$("rw-escalate").addEventListener("change", saveRecoveryWatcher);
+loadRecoveryWatcher();
 </script>
 </body>
 </html>`;
 
 export function startUIServer(port = 7878): http.Server {
   let schedulerHandle: SchedulerHandle | null = null;
+  let recoveryWatcherHandle: RecoveryWatcherHandle | null = null;
   const server = http.createServer((req, res) => {
     const send = (status: number, body: any, contentType = "application/json") => {
       res.statusCode = status;
@@ -783,6 +867,25 @@ export function startUIServer(port = 7878): http.Server {
         req.on("error", (e: any) => send(400, { error: e.message }));
         return;
       }
+      if (req.method === "GET" && p === "/api/recovery-watcher") {
+        return send(200, readRecoveryWatcherSettings());
+      }
+      if (req.method === "POST" && p === "/api/recovery-watcher") {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            const next = writeRecoveryWatcherSettings(parsed);
+            if (recoveryWatcherHandle) recoveryWatcherHandle.reschedule();
+            send(200, next);
+          } catch (e: any) {
+            send(400, { error: e.message });
+          }
+        });
+        req.on("error", (e: any) => send(400, { error: e.message }));
+        return;
+      }
       send(404, { error: "not found" });
     } catch (e: any) {
       send(500, { error: e.message });
@@ -793,6 +896,7 @@ export function startUIServer(port = 7878): http.Server {
 
   const stopNotifier = startMessageNotifier();
   schedulerHandle = startScheduler();
+  recoveryWatcherHandle = startRecoveryWatcher();
 
   const writeLock = () => {
     try {
@@ -814,6 +918,7 @@ export function startUIServer(port = 7878): http.Server {
   const stopAll = () => {
     stopNotifier();
     if (schedulerHandle) schedulerHandle.stop();
+    if (recoveryWatcherHandle) recoveryWatcherHandle.stop();
     cleanup();
   };
   process.on("SIGTERM", () => { stopAll(); process.exit(0); });
