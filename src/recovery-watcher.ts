@@ -81,10 +81,19 @@ const SCROLLBACK_TAIL_CHARS = 1500;
 
 // Matched error text must be within this many characters of the END of
 // the captured scrollback. When a CLI is genuinely stuck, the error is
-// the LAST thing on screen above the prompt. When an agent is merely
-// discussing an error in conversation, more text follows the mention,
-// pushing it away from the end. This is the key false-positive guard.
-const MAX_DISTANCE_FROM_END = 400;
+// near the LAST thing on screen above the prompt. When an agent is
+// merely discussing an error in conversation, more text follows the
+// mention, pushing it well away from the end. This is the key
+// false-positive guard.
+//
+// The threshold sits at 1000 chars because Claude Code renders ~500 chars
+// of UI chrome BELOW a real error (empty prompt line, horizontal
+// separators, the "⏵⏵ auto mode on" footer, blank lines). v1.4.0 was
+// tuned at 400 based on a synthetic test that omitted that chrome and
+// false-negative'd real stuck terminals in production. Discussion cases
+// observed at ≥1250 chars from end, so 1000 keeps a clean margin without
+// re-introducing the false-positive surface.
+const MAX_DISTANCE_FROM_END = 1000;
 
 interface AgentState {
   lastSignature: string | null;
