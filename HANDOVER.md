@@ -2,11 +2,41 @@
 
 > **Purpose:** First thing to read when resuming work on the claudelink package itself. `CLAUDE.md` is the always-on directive layer; this file is the session-resume pointer.
 >
-> **Last session:** 2026-05-08
+> **Last session:** 2026-05-25
 
 ---
 
-## Current status: v1.3.2 LIVE on npm (Codex env-strip fix); v1.4.0 Recovery Watcher staged locally; multi-machine renumbered to v1.5
+## Current status: v1.4.1 LIVE on npm; v1.4.2 STAGED LOCALLY soaking 6-7h before publish decision
+
+**Why we're holding v1.4.2 local:** v1.4.0/1/2 shipped in <24h, each finding a bug the previous missed. Code review + architect review just landed and prompted four substantive fixes in src/recovery-watcher.ts. User explicitly wants real-load soak (6-7h overnight on the 14-agent fleet) before publishing to npm. Local install on user's machine is already running v1.4.2 code — fleet is protected. Only the public registry is on 1.4.1 in the meantime.
+
+**Local v1.4.2 commits + tag (DO NOT push yet — wait for user's go-ahead):**
+- `9f9a390` fix(recovery-watcher): closest-to-end matching + multi-line patterns + canonical signatures + re-entrancy guard
+- `d24b77c` Release v1.4.2 commit (package.json bump)
+- Tag `v1.4.2` at `d24b77c` (local-only, not pushed)
+
+**Soak watch list (signals to flag):**
+- `skip-tick: previous tick still in flight` in `~/.claudelink/recovery-watcher.log` → H1 concern is real under load (tick blocking)
+- Multiple fires on Global Sites Developer or ClaudeLink Developer → tightened pattern 10 still letting discussion-prose through
+- Same agent firing 3+ times with `consecutive=1` → M1 canonicalization missed some volatile-byte variants
+- `escalated` lines → API genuinely down extended period
+- Long silence after a real visible API error → C1 still has uncaught case
+
+**Decision rule for tomorrow morning:** clean log + agents resuming after fires → publish v1.4.2. Issues found → fix, bump to v1.4.3, soak again.
+
+## v1.4.3 / v1.5 candidates (from tonight's architect review)
+
+| Pri | Item | Notes |
+|---|---|---|
+| v1.4.3 | Async `execFile` for `captureScrollback` + `injectKeystroke` with concurrency cap (4-6) | Architect's HIGH — event-loop block of up to 42s per tick on 14-agent fleet under iTerm2 unresponsive conditions; will surface as fleet scales |
+| v1.4.3 | OR: batched single AppleScript per tick returning `{tty: contents}` dict | More invasive but eliminates N-osascript fan-out entirely |
+| v1.4.3 | `KeystrokeDispatcher` mutex keyed by tty (~30 lines) | Serializes scheduler + watcher writes to same terminal; prevents interleaving |
+| v1.4.3 | Re-escalation interval (currently one-shot notification) | If API down for hours, currently silent after first notify |
+| v1.5 | "Last visible block above empty prompt" anchoring for detection | Eliminates position-threshold tuning; the substring+threshold approach has been tuned 3x already |
+| v1.5 | Recovery Watcher runs on **spoke** (not hub) | `injectKeystroke` is already pure → port is clean; add `host` filter to `selectCandidates` once schema v3 lands |
+| Build-log | Tell Global Sites Developer to nuance safety-boundary framing | "safe channel, multiple trigger sources, each disclosed" not "keystroke is human" — recovery watcher widens the trigger surface |
+
+## Prior status (older session): v1.3.2 LIVE on npm (Codex env-strip fix); v1.4.0 Recovery Watcher staged locally; multi-machine renumbered to v1.5
 
 **Latest priority work:**
 
