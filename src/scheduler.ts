@@ -150,6 +150,25 @@ function selectCandidates(db: Database.Database): NudgeCandidate[] {
   return rows.filter((c) => isProcessAlive(c.pid));
 }
 
+// Per-agent recheck — guards against shared-broadcast races where an
+// earlier candidate in this tick (or a separate readInbox path like a
+// Stop hook firing concurrently) already consumed the only unread row.
+// SQL mirrors the EXISTS clause in selectCandidates exactly so the
+// "is this agent still eligible?" semantics match the original filter.
+// Returns true if the agent has unread mail right NOW.
+function hasUnreadMail(db: Database.Database, agentId: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM messages m
+       WHERE m.read = 0
+         AND m.from_agent != ?
+         AND (m.to_agent = ? OR m.to_agent IS NULL)
+       LIMIT 1`
+    )
+    .get(agentId, agentId);
+  return row !== undefined;
+}
+
 export interface SchedulerHandle {
   reschedule: () => void;
   stop: () => void;
@@ -178,6 +197,34 @@ export function startScheduler(): SchedulerHandle {
     if (candidates.length === 0) return summary;
 
     for (const c of candidates) {
+      // Just-in-time recheck. selectCandidates snapshots the candidate set
+      // once, but the dispatch loop runs serially with ~600ms-3s per
+      // osascript call. With a shared broadcast row (single `read` flag for
+      // all recipients), the first agent to consume it via readInbox or a
+      // Stop hook flips read=1 globally — leaving subsequent candidates in
+      // this tick's snapshot pointing at no actual unread mail. Without the
+      // recheck, we'd type "check for updates" into terminals whose inbox
+      // is now empty (spurious-check-for-updates symptom).
+      let stillEligible: boolean;
+      try {
+        stillEligible = hasUnreadMail(openDb(), c.id);
+      } catch (e: any) {
+        // Fail-open: treat DB errors as eligible, mirroring the project's
+        // stated hook posture. If the DB is truly broken, injectKeystroke
+        // will fail too and be logged there.
+        logLine(
+          `recheck-error role=${c.role} tty=${c.tty} error="${e?.message ?? String(e)}"`
+        );
+        stillEligible = true;
+      }
+      if (!stillEligible) {
+        summary.skipped++;
+        logLine(
+          `skip-recheck role=${c.role} tty=${c.tty} reason="inbox drained mid-tick"`
+        );
+        continue;
+      }
+
       const result = injectKeystroke(c, NUDGE_TEXT);
       if (result === "ok") {
         summary.fired++;
@@ -189,6 +236,16 @@ export function startScheduler(): SchedulerHandle {
       } else {
         summary.failed++;
       }
+    }
+
+    // Tick summary makes the broadcast race observable. A healthy directed-
+    // mail tick looks like `candidates=3 fired=3 skipped=0`. A broadcast
+    // cascade with race losses looks like `candidates=14 fired=1 skipped=13`
+    // — that pattern is the smoking-gun fingerprint.
+    if (candidates.length > 0) {
+      logLine(
+        `tick-summary candidates=${candidates.length} fired=${summary.fired} skipped=${summary.skipped} failed=${summary.failed}`
+      );
     }
     return summary;
   };
