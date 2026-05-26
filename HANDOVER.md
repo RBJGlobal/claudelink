@@ -6,25 +6,49 @@
 
 ---
 
-## Current status: v1.4.1 LIVE on npm; v1.4.2 STAGED LOCALLY soaking 6-7h before publish decision
+## Current status: v1.4.1 LIVE on npm; v1.4.2 + v1.4.3 STAGED LOCALLY soaking before publish decision
 
-**Why we're holding v1.4.2 local:** v1.4.0/1/2 shipped in <24h, each finding a bug the previous missed. Code review + architect review just landed and prompted four substantive fixes in src/recovery-watcher.ts. User explicitly wants real-load soak (6-7h overnight on the 14-agent fleet) before publishing to npm. Local install on user's machine is already running v1.4.2 code — fleet is protected. Only the public registry is on 1.4.1 in the meantime.
+**Why we're holding local:** v1.4.0/1/2/3 are all separate fixes, evaluated under real-load conditions on the 14-agent fleet before any goes to the public registry. Founder's local install runs the latest staged code — fleet is protected. Only npmjs.com lags at 1.4.1 in the meantime.
 
-**Local v1.4.2 commits + tag (DO NOT push yet — wait for user's go-ahead):**
+**Local v1.4.2 (Recovery Watcher fixes from yesterday's review):**
 - `9f9a390` fix(recovery-watcher): closest-to-end matching + multi-line patterns + canonical signatures + re-entrancy guard
-- `d24b77c` Release v1.4.2 commit (package.json bump)
-- Tag `v1.4.2` at `d24b77c` (local-only, not pushed)
+- `d24b77c` Release v1.4.2 commit
+- Tag `v1.4.2` at `d24b77c` (local-only)
 
-**Soak watch list (signals to flag):**
-- `skip-tick: previous tick still in flight` in `~/.claudelink/recovery-watcher.log` → H1 concern is real under load (tick blocking)
-- Multiple fires on Global Sites Developer or ClaudeLink Developer → tightened pattern 10 still letting discussion-prose through
-- Same agent firing 3+ times with `consecutive=1` → M1 canonicalization missed some volatile-byte variants
+**Local v1.4.3 (scheduler broadcast race-fix from tonight's three-agent review):**
+- `1152243` fix(scheduler): per-agent recheck before injectKeystroke kills broadcast read-race
+- Tag `v1.4.3` at `<release-commit>` (local-only)
+- Root cause confirmed by parallel code-reviewer + architect agents: scheduler's `EXISTS (... OR m.to_agent IS NULL)` flags all eligible agents on any unread broadcast; sequential dispatch + shared `messages.read` column = first agent to readInbox consumes broadcast globally, remaining ~13 candidates fire into empty inboxes. New `hasUnreadMail()` recheck just-in-time before `injectKeystroke` skips the spurious dispatches. New `tick-summary candidates=N fired=F skipped=S failed=X` line makes the race observable.
+- Stop hook is a SECOND racer (both autonomous_reply=0 direct path and autonomous_reply=1 directive path can flip the shared broadcast read=1) — recheck handles this for free.
+
+**Soak watch list (signals to flag in `~/.claudelink/recovery-watcher.log` AND `~/.claudelink/scheduler.log`):**
+
+Recovery Watcher (v1.4.2):
+- `skip-tick: previous tick still in flight` → tick blocking under load
+- Multiple fires on Global Sites Developer or ClaudeLink Developer → pattern 10 still letting discussion-prose through
+- Same agent firing 3+ times with `consecutive=1` → canonicalization missed volatile-byte variants
 - `escalated` lines → API genuinely down extended period
-- Long silence after a real visible API error → C1 still has uncaught case
+- Long silence after a real visible API error → still an uncaught case
 
-**Decision rule for tomorrow morning:** clean log + agents resuming after fires → publish v1.4.2. Issues found → fix, bump to v1.4.3, soak again.
+Scheduler (v1.4.3):
+- `tick-summary candidates=14 fired=1 skipped=13` → broadcast race detected and prevented (this is the smoking-gun fingerprint working as designed)
+- `skip-recheck role=X reason="inbox drained mid-tick"` → confirms recheck killed a would-have-been-spurious dispatch
+- Long-running ETIMEDOUTs on clawless-advisor → terminal still unresponsive to AppleScript (separate persistent issue; needs quit+reopen)
 
-## v1.4.3 / v1.5 candidates (from tonight's architect review)
+**Decision rule for tomorrow morning:**
+- Clean logs across both subsystems → publish v1.4.2 + v1.4.3 (separate releases, in order)
+- Recovery Watcher issues found → fix v1.4.4 patch on top of v1.4.2; hold v1.4.3 for separate evaluation
+- Scheduler race-fix issues found → revisit Option B's residual ~200ms window or pull Option A (fan-out) forward
+
+## v1.5 long-term broadcast fix — DECIDED: fan-out at send time
+
+Decision made tonight after parallel architect + code reviewer debate: v1.5 will replace `broadcastMessage()` with a fan-out implementation that inserts N directed message rows at send time (one per agent), same shape as `sendMessage`. Schema unchanged. Race killed at source. v1.4.3 recheck becomes defense-in-depth.
+
+Rejected alternatives: (A) new `broadcast_reads(agent_id, message_id)` table — correct-by-construction but bigger migration; (C) remove broadcast trigger from scheduler — breaks the clawless-advisor coordination broadcast pattern that's documented production usage.
+
+Fan-out gotcha to handle: `sendMessage` resolves recipients by role; broadcast needs the full agent roster at send time (one extra query inside a transaction). Trivial. Multi-machine v1.5 spoke implementations will fan out per-host.
+
+## Other v1.4.4+ / v1.5 candidates (from prior architect reviews)
 
 | Pri | Item | Notes |
 |---|---|---|
