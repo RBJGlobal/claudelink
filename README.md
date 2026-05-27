@@ -9,6 +9,10 @@
 [![MCP](https://img.shields.io/badge/Protocol-MCP-f59e0b.svg?style=flat-square)](https://modelcontextprotocol.io/)
 [![Local-first](https://img.shields.io/badge/Local--First-no%20cloud-22c55e.svg?style=flat-square)](#local-first-security)
 
+![ClaudeLink — Connect. Communicate. Collaborate.](docs/assets/ClaudeLink_Command.png)
+
+![Focus. Build. Automate. Scale.](docs/assets/Command_grok.jpg)
+
 ClaudeLink is an open-source [MCP](https://modelcontextprotocol.io/) server that turns multiple AI coding agents — Claude Code, OpenAI Codex CLI, Google Gemini CLI, Block's Goose, or any MCP-compatible client — into a **single coordinated team**. Open four terminals, give each one a role, and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away.
 
 **The name says "Claude" but ClaudeLink is model-agnostic.** Each CLI you plug in chooses its own backing model — and through Goose alone you can wire any of **25+ LLM providers**, putting hundreds of models within reach of the same mesh. A Claude reviewer talking to a Codex developer talking to a Gemini tester talking to a Llama-via-Ollama deep-thinker is a fully supported pattern. The mesh doesn't care; the LLM is somebody else's problem.
