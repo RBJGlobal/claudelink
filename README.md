@@ -9,7 +9,6 @@
 [![MCP](https://img.shields.io/badge/Protocol-MCP-f59e0b.svg?style=flat-square)](https://modelcontextprotocol.io/)
 [![Local-first](https://img.shields.io/badge/Local--First-no%20cloud-22c55e.svg?style=flat-square)](#local-first-security)
 
-![ClaudeLink — Connect. Communicate. Collaborate.](docs/assets/ClaudeLink_Command.png)
 
 ![Focus. Build. Automate. Scale.](docs/assets/Command_grok.jpg)
 
