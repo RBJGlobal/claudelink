@@ -40,6 +40,12 @@ You are part of a multi-agent team. Other agents may be running in separate term
 - **"who's online"** — Use \`get_agents\` to list all connected agents
 - **"update the board"** — Use \`post_bulletin\` to post a status update
 - **"check the board"** — Use \`get_bulletin\` to read the bulletin board
+
+### Token & Context Hygiene
+
+> The fleet-wide token, context, and cost protocol is maintained by the team and is inserted below. Until it lands, follow your project's standing guidance on context length and model choice.
+
+<!-- CLAUDELINK:TOKEN_PROTOCOL — fleet token/context/cost protocol content is inserted here -->
 `.trim();
 
 const CLAUDE_MD_MARKER = "## ClaudeLink - Autonomous Agent Communication";
@@ -72,6 +78,12 @@ You are part of a multi-agent team. Other agents (Codex CLI, Claude Code, Gemini
 - "who's online" — call \`get_agents\`
 - "update the board" — call \`post_bulletin\`
 - "check the board" — call \`get_bulletin\`
+
+### Token & context hygiene
+
+> The fleet-wide token, context, and cost protocol is maintained by the team and is inserted below. Until it lands, follow your project's standing guidance on context length and model choice.
+
+<!-- CLAUDELINK:TOKEN_PROTOCOL — fleet token/context/cost protocol content is inserted here -->
 `.trim();
 
 const AGENTS_MD_MARKER = "## ClaudeLink - Multi-Agent Coordination";

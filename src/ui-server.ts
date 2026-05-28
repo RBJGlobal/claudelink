@@ -17,6 +17,7 @@ import {
   readSchedulerSettings,
   writeSchedulerSettings,
 } from "./scheduler-settings.js";
+import { readFleetUsage, FleetUsage } from "./usage-reader.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -171,6 +172,26 @@ function getState(): {
     },
     recent_messages: recent,
   };
+}
+
+// Fleet token meter. Reads LIVE registered agents (role + pid) and hands them to
+// the usage reader, which maps each to its Claude Code project dir and tallies
+// real token usage from the local transcripts. Privacy guardrail: only LIVE
+// fleet agents are passed, so we never scan the user's unrelated ~/.claude
+// history. Read-only — no DB writes, no terminal contact.
+async function getUsage(windowDays: number): Promise<FleetUsage> {
+  const db = new Database(DB_PATH, { readonly: true });
+  let rows: { role: string; pid: number }[];
+  try {
+    rows = db.prepare(`SELECT role, pid FROM agents`).all() as {
+      role: string;
+      pid: number;
+    }[];
+  } finally {
+    db.close();
+  }
+  const live = rows.filter((r) => isProcessAlive(r.pid));
+  return readFleetUsage(live, windowDays);
 }
 
 function healOrphans(): { deleted_messages: number; pruned_agents: number } {
@@ -338,6 +359,24 @@ const HTML = String.raw`<!doctype html>
   .nudge-status.show { opacity: 1; }
   .nudge-hint { color: var(--muted); font-size: 12px; padding: 0 16px 14px; line-height: 1.5; margin: 0; }
   .nudge-hint .mono { color: var(--text); }
+  /* Fleet Token Meter */
+  .usage-summary { display: flex; gap: 14px; flex-wrap: wrap; padding: 4px 16px 12px; }
+  .usage-stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; min-width: 120px; }
+  .usage-stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .usage-stat .value { color: var(--text); font-size: 20px; font-weight: 600; margin-top: 3px; }
+  .usage-stat .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .usage-trend { display: flex; align-items: flex-end; gap: 6px; height: 84px; padding: 0 16px 10px; }
+  .usage-bar { flex: 1; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; position: relative; opacity: 0.85; transition: height 0.2s; }
+  .usage-bar:hover { opacity: 1; }
+  .usage-bar .cap { position: absolute; top: -16px; left: 0; right: 0; text-align: center; font-size: 9px; color: var(--muted); }
+  .usage-bar .day { position: absolute; bottom: -16px; left: 0; right: 0; text-align: center; font-size: 9px; color: var(--muted); }
+  .usage-proj { width: 100%; border-collapse: collapse; margin: 6px 0 4px; }
+  .usage-proj th { text-align: left; color: var(--muted); font-size: 11px; font-weight: 500; padding: 6px 16px; border-bottom: 1px solid var(--border); }
+  .usage-proj td { padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text); vertical-align: top; }
+  .usage-proj td.num { text-align: right; font-family: ui-monospace, Menlo, monospace; }
+  .usage-proj tr:last-child td { border-bottom: none; }
+  .usage-model-chip { display: inline-block; background: rgba(184,156,255,0.14); color: var(--accent); border-radius: 8px; padding: 1px 7px; font-size: 10px; margin: 1px 3px 1px 0; font-family: ui-monospace, Menlo, monospace; }
+  .usage-roles { color: var(--muted); font-size: 11px; margin-top: 2px; }
   .auto-reply-cell { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; user-select: none; }
   .auto-reply-cell input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent); margin: 0; }
   .auto-reply-cell .lbl { font-size: 11px; color: var(--muted); min-width: 22px; }
@@ -448,6 +487,30 @@ const HTML = String.raw`<!doctype html>
       </p>
       <p class="nudge-hint">
         Recovery message: <span class="mono" id="rw-message">—</span>
+      </p>
+    </div>
+  </section>
+
+  <section class="panel full">
+    <h2>Fleet Token Meter <span class="count" id="usage-window">7d</span></h2>
+    <div class="body">
+      <div class="nudge-controls">
+        <label class="nudge-interval">
+          Window:
+          <select id="usage-days">
+            <option value="1">Today</option>
+            <option value="7" selected>7 days</option>
+            <option value="14">14 days</option>
+            <option value="30">30 days</option>
+          </select>
+        </label>
+        <span id="usage-status" class="nudge-status"></span>
+      </div>
+      <div class="usage-summary" id="usage-summary"></div>
+      <div class="usage-trend" id="usage-trend"></div>
+      <div id="usage-projects"></div>
+      <p class="nudge-hint">
+        Reads each live agent's local Claude Code transcript and totals real token usage per project and per model. Counts are exact (input / output / cache), deduped across forked sessions. The dollar figure is <em>API-equivalent value at list price</em> — on a Max plan you pay a flat fee, so it shows how much consumption the subscription is buying, not a bill. Shows consumption, not your plan's weekly quota ceiling (that's server-side and not exposed locally). Read-only — never writes transcripts or touches terminals.
       </p>
     </div>
   </section>
@@ -773,6 +836,78 @@ $("rw-interval").addEventListener("change", saveRecoveryWatcher);
 $("rw-cooldown").addEventListener("change", saveRecoveryWatcher);
 $("rw-escalate").addEventListener("change", saveRecoveryWatcher);
 loadRecoveryWatcher();
+
+// --- Fleet Token Meter ---
+function fmtTokens(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return String(n);
+}
+function fmtUsd(n) {
+  return "$" + (n >= 100 ? Math.round(n).toLocaleString() : n.toFixed(2));
+}
+function renderUsage(u) {
+  const t = u.fleet.totals;
+  const models = Object.keys(u.fleet.perModel).sort();
+  $("usage-window").textContent = u.windowDays + "d";
+  $("usage-summary").innerHTML =
+    '<div class="usage-stat"><div class="label">Total tokens</div><div class="value">' + fmtTokens(t.totalTokens) + '</div><div class="sub">' + u.scannedProjects + ' projects</div></div>' +
+    '<div class="usage-stat"><div class="label">API-equiv. value</div><div class="value">' + fmtUsd(t.estCostUsd) + '</div><div class="sub">at list price · Max = flat fee</div></div>' +
+    '<div class="usage-stat"><div class="label">Output tokens</div><div class="value">' + fmtTokens(t.output) + '</div><div class="sub">' + fmtTokens(t.input) + ' input</div></div>' +
+    '<div class="usage-stat"><div class="label">Cache reads</div><div class="value">' + fmtTokens(t.cacheRead) + '</div><div class="sub">' + fmtTokens(t.cacheCreation) + ' writes</div></div>' +
+    '<div class="usage-stat"><div class="label">Models</div><div class="value" style="font-size:13px;font-weight:500;line-height:1.5">' + (models.map(m => '<span class="usage-model-chip">' + escapeHtml(m.replace("claude-","")) + '</span>').join("") || "—") + '</div></div>';
+
+  // Per-day trend bars (scaled to the busiest day).
+  const max = Math.max(1, ...u.fleet.perDay.map(d => d.totalTokens));
+  $("usage-trend").innerHTML = u.fleet.perDay.map(d => {
+    const h = Math.round((d.totalTokens / max) * 100);
+    const dd = d.date.slice(5); // MM-DD
+    return '<div class="usage-bar" style="height:' + h + '%" title="' + d.date + ': ' + fmtTokens(d.totalTokens) + ' tok · ' + fmtUsd(d.estCostUsd) + '"><span class="cap">' + (d.totalTokens ? fmtTokens(d.totalTokens) : '') + '</span><span class="day">' + dd + '</span></div>';
+  }).join("");
+
+  // Per-project table, heaviest first.
+  let rows = u.projects.map(pr => {
+    const chips = Object.keys(pr.perModel).sort().map(m =>
+      '<span class="usage-model-chip">' + escapeHtml(m.replace("claude-","")) + ' ' + fmtTokens(pr.perModel[m].totalTokens) + '</span>').join("");
+    const rolesLine = pr.agentRoles.length > 1
+      ? '<div class="usage-roles">' + escapeHtml(pr.agentRoles.join(", ")) + '</div>' : "";
+    return '<tr>' +
+      '<td>' + escapeHtml(pr.label) + rolesLine + '</td>' +
+      '<td class="num">' + fmtTokens(pr.totals.totalTokens) + '</td>' +
+      '<td class="num">' + fmtUsd(pr.totals.estCostUsd) + '</td>' +
+      '<td>' + (chips || "—") + '</td>' +
+    '</tr>';
+  }).join("");
+  if (!rows) rows = '<tr><td colspan="4" style="color:var(--muted)">No in-window usage found for live fleet agents.</td></tr>';
+  let note = "";
+  if (u.skippedNoCwd && u.skippedNoCwd.length) {
+    note = '<p class="nudge-hint" style="padding-top:8px">Unmapped (no project dir resolved): ' + escapeHtml(u.skippedNoCwd.join(", ")) + '</p>';
+  }
+  $("usage-projects").innerHTML =
+    '<table class="usage-proj"><thead><tr><th>Project / agent</th><th style="text-align:right">Tokens</th><th style="text-align:right">API-equiv. $</th><th>By model</th></tr></thead><tbody>' +
+    rows + '</tbody></table>' + note;
+}
+async function loadUsage() {
+  const days = parseInt($("usage-days").value, 10) || 7;
+  const status = $("usage-status");
+  status.textContent = "reading transcripts…";
+  status.classList.add("show");
+  try {
+    const u = await api("/api/usage?days=" + days, "GET");
+    renderUsage(u);
+    status.textContent = "updated";
+    setTimeout(() => status.classList.remove("show"), 1200);
+  } catch (e) {
+    status.textContent = "";
+    status.classList.remove("show");
+    if (!e.disconnected) toast("Failed to load usage: " + e.message, "error");
+  }
+}
+$("usage-days").addEventListener("change", loadUsage);
+loadUsage();
+// Transcript parsing is heavier than /api/state — refresh on a slow cadence.
+setInterval(loadUsage, 30000);
 </script>
 </body>
 </html>`;
@@ -867,6 +1002,14 @@ export function startUIServer(port = 7878): http.Server {
         req.on("error", (e: any) => send(400, { error: e.message }));
         return;
       }
+      if (req.method === "GET" && p === "/api/usage") {
+        const raw = parseInt(url.searchParams.get("days") || "7", 10);
+        const days = Number.isFinite(raw) ? Math.max(1, Math.min(30, raw)) : 7;
+        getUsage(days)
+          .then((u) => send(200, u))
+          .catch((e: any) => send(500, { error: e?.message ?? String(e) }));
+        return;
+      }
       if (req.method === "GET" && p === "/api/recovery-watcher") {
         return send(200, readRecoveryWatcherSettings());
       }
@@ -894,11 +1037,21 @@ export function startUIServer(port = 7878): http.Server {
 
   server.listen(port, "127.0.0.1");
 
-  const stopNotifier = startMessageNotifier();
-  schedulerHandle = startScheduler();
-  recoveryWatcherHandle = startRecoveryWatcher();
+  // Render-only mode: serve the UI + read endpoints WITHOUT starting the
+  // scheduler / recovery-watcher / notifier, and without touching the
+  // singleton lock. Lets a second instance be spun up safely (e.g. for a
+  // local screenshot or a smoke test) while the real Command Center keeps
+  // owning the lock and the keystroke dispatchers — no double-firing.
+  const noServices = process.env.CLAUDELINK_UI_NO_SERVICES === "1";
+  let stopNotifier: () => void = () => {};
+  if (!noServices) {
+    stopNotifier = startMessageNotifier();
+    schedulerHandle = startScheduler();
+    recoveryWatcherHandle = startRecoveryWatcher();
+  }
 
   const writeLock = () => {
+    if (noServices) return;
     try {
       fs.writeFileSync(
         LOCK_PATH,
