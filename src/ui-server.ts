@@ -28,6 +28,7 @@ import {
   readContextWatcherSettings,
   writeContextWatcherSettings,
 } from "./context-watcher-settings.js";
+import { analyzeCompactEvents } from "./compact-analyzer.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -1033,6 +1034,22 @@ export function startUIServer(port = 7878): http.Server {
       }
       if (req.method === "GET" && p === "/api/context-watcher") {
         return send(200, readContextWatcherSettings());
+      }
+      if (req.method === "GET" && p === "/api/compact-analysis") {
+        const raw = parseInt(url.searchParams.get("days") || "30", 10);
+        const days = Number.isFinite(raw) ? Math.max(1, Math.min(90, raw)) : 30;
+        const db = new Database(DB_PATH, { readonly: true });
+        let rows: { role: string; pid: number }[];
+        try {
+          rows = db.prepare(`SELECT role, pid FROM agents`).all() as { role: string; pid: number }[];
+        } finally {
+          db.close();
+        }
+        const live = rows.filter((r) => isProcessAlive(r.pid));
+        analyzeCompactEvents(live, days)
+          .then((a) => send(200, a))
+          .catch((e: any) => send(500, { error: e?.message ?? String(e) }));
+        return;
       }
       if (req.method === "POST" && p === "/api/context-watcher") {
         let body = "";
