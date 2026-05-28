@@ -231,6 +231,94 @@ function median(nums: number[]): number {
   return s[Math.floor(s.length / 2)];
 }
 
+// ── Path-A loss baseline + A-vs-B comparison harness (design §C / §D) ──
+// Deeper read of the HISTORICAL /compact events (= Path A): does loss scale with
+// context size? what do the worst cases look like? The comparison harness is
+// pre-instrumented so the soak drops Path-B events in for a clean A-vs-B. We do
+// NOT fabricate a B side — there is no historical CLEAR+reinject data.
+
+export interface LossBucket {
+  bucket: string;
+  count: number;
+  reworkRate: number;
+  reexplainRate: number;
+  medianTurnsToRecover: number | null;
+}
+export interface LossBaseline {
+  source: string;
+  totalEvents: number;
+  byPreTokenBucket: LossBucket[];
+  worstCases: Array<{
+    project: string;
+    preTokens: number | null;
+    reworkHits: number;
+    turnsToRecover: number | null;
+    userReexplain: boolean;
+  }>;
+  comparison: {
+    pathA: { source: string; events: number; reworkRate: number; reexplainRate: number; medianTurnsToRecover: number | null };
+    pathB: null; // awaiting the founder-gated soak — cannot be measured read-only
+    defaultSoakPath: "A";
+    note: string;
+  };
+}
+
+const BUCKETS: Array<[string, number, number]> = [
+  ["<100K", 0, 100_000],
+  ["100-250K", 100_000, 250_000],
+  ["250-500K", 250_000, 500_000],
+  ["500K-1M", 500_000, 1_000_000],
+  [">=1M", 1_000_000, Infinity],
+];
+
+export function pathALossBaseline(events: CompactEvent[]): LossBaseline {
+  const rate = (es: CompactEvent[], pred: (e: CompactEvent) => boolean) =>
+    es.length ? es.filter(pred).length / es.length : 0;
+
+  const byPreTokenBucket: LossBucket[] = BUCKETS.map(([label, lo, hi]) => {
+    const es = events.filter((e) => (e.preTokens ?? 0) >= lo && (e.preTokens ?? 0) < hi);
+    const recov = es.map((e) => e.turnsToRecover).filter((n): n is number => n !== null);
+    return {
+      bucket: label,
+      count: es.length,
+      reworkRate: rate(es, (e) => e.reworkHits > 0),
+      reexplainRate: rate(es, (e) => e.userReexplain),
+      medianTurnsToRecover: recov.length ? median(recov) : null,
+    };
+  }).filter((b) => b.count > 0);
+
+  const worstCases = [...events]
+    .sort((a, b) => b.reworkHits - a.reworkHits || (b.turnsToRecover ?? 0) - (a.turnsToRecover ?? 0))
+    .slice(0, 5)
+    .map((e) => ({
+      project: e.project,
+      preTokens: e.preTokens,
+      reworkHits: e.reworkHits,
+      turnsToRecover: e.turnsToRecover,
+      userReexplain: e.userReexplain,
+    }));
+
+  const recovAll = events.map((e) => e.turnsToRecover).filter((n): n is number => n !== null);
+  return {
+    source: "historical Path-A (Claude Code /compact); HEURISTIC signals; NON-representative of auto-trigger rates (manual = task-boundary timing). Validates detection mechanics, not arming-phase loss rates.",
+    totalEvents: events.length,
+    byPreTokenBucket,
+    worstCases,
+    comparison: {
+      pathA: {
+        source: "historical /compact (this dataset)",
+        events: events.length,
+        reworkRate: rate(events, (e) => e.reworkHits > 0),
+        reexplainRate: rate(events, (e) => e.userReexplain),
+        medianTurnsToRecover: recovAll.length ? median(recovAll) : null,
+      },
+      pathB: null,
+      defaultSoakPath: "A",
+      note: "Path B (CLEAR+reinject) has no historical data and cannot be measured read-only — its loss signals only exist if the path is executed in the founder-gated soak. A is the conservative-soak default; B is tested against A's measured baseline.",
+    },
+  };
+}
+
 export async function analyzeCompactEvents(
   agents: AgentRef[],
   windowDays = 30
