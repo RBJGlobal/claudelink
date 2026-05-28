@@ -122,6 +122,18 @@ function main(): number {
 
     db.updateLastSeenActive(agent.id);
 
+    // v3: capture this agent's session identity from the hook payload so it can
+    // be mapped to its EXACT transcript (resolving per-agent attribution in
+    // shared repo dirs). Idempotent — only writes when it changes. Wrapped so a
+    // capture failure can never affect the hook's auto-fire decision.
+    if (payload.session_id || payload.transcript_path) {
+      try {
+        db.setAgentSession(agent.id, payload.session_id ?? null, payload.transcript_path ?? null);
+      } catch {
+        // best-effort metadata; never break the hook
+      }
+    }
+
     if (agent.autonomous_reply === 0) {
       // Advisor pattern: never block-and-continue. We DO consume the inbox
       // here (mark messages read) so they don't pile up forever — the agent

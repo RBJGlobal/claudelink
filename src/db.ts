@@ -17,6 +17,12 @@ export interface Agent {
   pane_id: string | null;
   last_seen_active_ts: number | null;
   autonomous_reply: number;
+  // v3: captured from the hook payload (session_id / transcript_path), so a
+  // registered agent can be mapped to its EXACT Claude Code session transcript
+  // — resolving per-agent attribution even when several agents share one repo
+  // dir. NULL until the agent's hook fires at least once (hooks must be installed).
+  session_id: string | null;
+  transcript_path: string | null;
 }
 
 export interface RegisterOptions {
@@ -149,6 +155,23 @@ export class NexusDB {
         `);
       });
       applyV2();
+    }
+
+    // v3 — session identity for exact agent->transcript mapping. Additive,
+    // nullable; populated from the hook payload (session_id / transcript_path).
+    // Rollback:
+    //   ALTER TABLE agents DROP COLUMN transcript_path;
+    //   ALTER TABLE agents DROP COLUMN session_id;
+    //   PRAGMA user_version = 2;
+    if (userVersion < 3) {
+      const applyV3 = this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE agents ADD COLUMN session_id TEXT;
+          ALTER TABLE agents ADD COLUMN transcript_path TEXT;
+          PRAGMA user_version = 3;
+        `);
+      });
+      applyV3();
     }
   }
 
@@ -389,6 +412,27 @@ export class NexusDB {
     const r = this.db
       .prepare(`UPDATE agents SET autonomous_reply = ? WHERE id = ?`)
       .run(enabled ? 1 : 0, agentId);
+    return r.changes > 0;
+  }
+
+  // Stamp the agent's Claude Code session identity, captured from a hook
+  // payload. Idempotent: only writes when a value actually changes, so the
+  // common case (same session firing the hook repeatedly) is a cheap no-op.
+  setAgentSession(
+    agentId: string,
+    sessionId: string | null,
+    transcriptPath: string | null
+  ): boolean {
+    const row = this.db
+      .prepare(`SELECT session_id, transcript_path FROM agents WHERE id = ?`)
+      .get(agentId) as { session_id: string | null; transcript_path: string | null } | undefined;
+    if (!row) return false;
+    if (row.session_id === (sessionId ?? null) && row.transcript_path === (transcriptPath ?? null)) {
+      return false; // unchanged — skip the write
+    }
+    const r = this.db
+      .prepare(`UPDATE agents SET session_id = ?, transcript_path = ? WHERE id = ?`)
+      .run(sessionId ?? null, transcriptPath ?? null, agentId);
     return r.changes > 0;
   }
 

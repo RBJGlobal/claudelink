@@ -61,11 +61,36 @@ interface SessionRef {
   ambiguous: boolean; // true if the project dir has >1 recently-active session
 }
 
+interface WatchedAgent {
+  role: string;
+  pid: number;
+  session_id: string | null;
+  transcript_path: string | null;
+}
+
+// Resolve an agent's session transcript. EXACT path (v3): if the hook captured
+// this agent's transcript_path, use it directly — unambiguous even in a shared
+// repo dir, and the source of truth for injection targeting. Otherwise fall
+// back to the most-recent transcript in the project dir (flagged ambiguous when
+// the dir has >1 recently-active session, since we can't tell which is whose).
+function resolveSession(agent: WatchedAgent): SessionRef | null {
+  if (agent.transcript_path) {
+    try {
+      if (fs.existsSync(agent.transcript_path)) {
+        return { file: agent.transcript_path, ambiguous: false };
+      }
+    } catch {
+      /* fall through to heuristic */
+    }
+  }
+  return mostRecentSession(agent.pid);
+}
+
 // The most-recently-modified transcript in an agent's project dir. For a
 // single-agent project this is unambiguously that agent's live session; for a
 // shared project (several agents in one repo) we flag it ambiguous — observe
 // can still read it, but injection must NOT target it until session->agent
-// mapping lands (register-time sessionId capture).
+// mapping (v3 transcript_path) is populated for that agent.
 function mostRecentSession(pid: number): SessionRef | null {
   const cwd = cwdForPid(pid);
   if (!cwd) return null;
@@ -282,11 +307,10 @@ export function startContextWatcher(): ContextWatcherHandle {
     return db;
   };
 
-  const liveAgents = (): { role: string; pid: number }[] => {
-    const rows = openDb().prepare(`SELECT role, pid FROM agents`).all() as {
-      role: string;
-      pid: number;
-    }[];
+  const liveAgents = (): WatchedAgent[] => {
+    const rows = openDb()
+      .prepare(`SELECT role, pid, session_id, transcript_path FROM agents`)
+      .all() as WatchedAgent[];
     return rows.filter((r) => isProcessAlive(r.pid));
   };
 
@@ -305,7 +329,7 @@ export function startContextWatcher(): ContextWatcherHandle {
 
       for (const a of liveAgents()) {
         summary.checked++;
-        const session = mostRecentSession(a.pid);
+        const session = resolveSession(a);
         if (!session) continue;
         let econ: TurnEconomics | null;
         try {
