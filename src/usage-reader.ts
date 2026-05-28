@@ -158,6 +158,13 @@ export function projectIdFromCwd(cwd: string): string {
 // estimate wherever surfaced.
 export const OPUS_CACHE_READ_PER_MTOK = PRICES.opus.cacheRead;
 
+// Model-aware cache-read price (USD per million tokens). The $/turn economic
+// trigger uses this so the threshold auto-adjusts across models — Opus triggers
+// far earlier than Haiku for the same context size, which is correct.
+export function cacheReadPricePerMtok(model: string): number {
+  return priceFor(model).cacheRead;
+}
+
 function localDate(ts: number): string {
   const d = new Date(ts);
   const y = d.getFullYear();

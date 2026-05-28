@@ -28,7 +28,18 @@ export interface ContextWatcherSettings {
   enabled: boolean;
   mode: WatcherMode;
   intervalSec: number;
-  thresholdTokens: number; // context occupancy that triggers a (would-)nudge
+  // ECONOMIC TRIGGER (primary): arm when projected per-turn cache-read cost
+  // crosses this $ threshold. Auto-adjusts across models (Opus arms far earlier
+  // than Haiku for the same context). Replaces the raw-size anchor.
+  dollarPerTurnThreshold: number;
+  // The fire-DECISION (separate from the trigger): only (would-)nudge when
+  // projected forward savings clearly exceed the handshake overhead. Overhead
+  // = prepare-prompt + handoff-write + ready-check + re-orient.
+  handshakeOverheadTokens: number;
+  // "Actively progressing" gate: only act if the session had a turn within this
+  // many minutes — so a high-$/turn session about to idle doesn't pay overhead.
+  activeWindowMin: number;
+  thresholdTokens: number; // legacy size anchor; retained for the projection baseline
   compactBaselineTokens: number; // assumed post-compact size, for projection
   cooldownMin: number; // min gap between nudges to the same session
   message: string;
@@ -42,6 +53,9 @@ const DEFAULTS: ContextWatcherSettings = {
   enabled: false,
   mode: "observe",
   intervalSec: 120,
+  dollarPerTurnThreshold: 0.27,
+  handshakeOverheadTokens: 5000,
+  activeWindowMin: 15,
   thresholdTokens: 200000,
   compactBaselineTokens: 60000,
   cooldownMin: 30,
@@ -62,6 +76,12 @@ export function readContextWatcherSettings(): ContextWatcherSettings {
       enabled: Boolean(parsed.enabled),
       mode: parsed.mode === "inject" ? "inject" : "observe",
       intervalSec: clampInt(Number(parsed.intervalSec), 30, 600, DEFAULTS.intervalSec),
+      dollarPerTurnThreshold:
+        Number.isFinite(Number(parsed.dollarPerTurnThreshold)) && Number(parsed.dollarPerTurnThreshold) > 0
+          ? Math.max(0.01, Math.min(10, Number(parsed.dollarPerTurnThreshold)))
+          : DEFAULTS.dollarPerTurnThreshold,
+      handshakeOverheadTokens: clampInt(Number(parsed.handshakeOverheadTokens), 0, 50000, DEFAULTS.handshakeOverheadTokens),
+      activeWindowMin: clampInt(Number(parsed.activeWindowMin), 1, 240, DEFAULTS.activeWindowMin),
       thresholdTokens: clampInt(Number(parsed.thresholdTokens), 20000, 1_000_000, DEFAULTS.thresholdTokens),
       compactBaselineTokens: clampInt(Number(parsed.compactBaselineTokens), 5000, 200000, DEFAULTS.compactBaselineTokens),
       cooldownMin: clampInt(Number(parsed.cooldownMin), 5, 240, DEFAULTS.cooldownMin),
@@ -90,6 +110,18 @@ export function writeContextWatcherSettings(
       partial.intervalSec !== undefined
         ? clampInt(Number(partial.intervalSec), 30, 600, current.intervalSec)
         : current.intervalSec,
+    dollarPerTurnThreshold:
+      partial.dollarPerTurnThreshold !== undefined && Number(partial.dollarPerTurnThreshold) > 0
+        ? Math.max(0.01, Math.min(10, Number(partial.dollarPerTurnThreshold)))
+        : current.dollarPerTurnThreshold,
+    handshakeOverheadTokens:
+      partial.handshakeOverheadTokens !== undefined
+        ? clampInt(Number(partial.handshakeOverheadTokens), 0, 50000, current.handshakeOverheadTokens)
+        : current.handshakeOverheadTokens,
+    activeWindowMin:
+      partial.activeWindowMin !== undefined
+        ? clampInt(Number(partial.activeWindowMin), 1, 240, current.activeWindowMin)
+        : current.activeWindowMin,
     thresholdTokens:
       partial.thresholdTokens !== undefined
         ? clampInt(Number(partial.thresholdTokens), 20000, 1_000_000, current.thresholdTokens)

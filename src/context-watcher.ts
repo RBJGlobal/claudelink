@@ -28,6 +28,7 @@ import {
   projectIdFromCwd,
   PROJECTS_DIR,
   OPUS_CACHE_READ_PER_MTOK,
+  cacheReadPricePerMtok,
 } from "./usage-reader.js";
 import {
   readContextWatcherSettings,
@@ -96,10 +97,21 @@ function inputSideTokens(u: any): number {
   );
 }
 
-// Current context occupancy = input-side tokens of the LAST real assistant turn
-// in the transcript. Streams the file keeping only the last value.
-async function latestContextTokens(file: string): Promise<number | null> {
-  let last: number | null = null;
+interface TurnEconomics {
+  contextTokens: number; // input-side tokens of the last real turn = occupancy
+  model: string;
+  lastTurnTs: number; // epoch ms of the last real turn (activity signal)
+  turnsPerHour: number; // burn rate over the recent turns (forward-exposure)
+}
+
+// Reads the economic state of a session's most-recent real turns: current
+// context occupancy + model (for $/turn pricing) + last activity + recent
+// turns/hour (rate-of-burn). Streams the file keeping a small rolling tail.
+async function latestTurnEconomics(file: string): Promise<TurnEconomics | null> {
+  let contextTokens: number | null = null;
+  let model = "";
+  const recentTs: number[] = []; // timestamps of recent real turns (rolling)
+  const RECENT = 20;
   const rl = readline.createInterface({
     input: fs.createReadStream(file, { encoding: "utf-8" }),
     crlfDelay: Infinity,
@@ -114,9 +126,23 @@ async function latestContextTokens(file: string): Promise<number | null> {
     }
     const msg = o?.message;
     if (!msg?.usage || !msg?.model || msg.model === "<synthetic>") continue;
-    last = inputSideTokens(msg.usage);
+    contextTokens = inputSideTokens(msg.usage);
+    model = msg.model;
+    const ts = Date.parse(o.timestamp || "");
+    if (Number.isFinite(ts)) {
+      recentTs.push(ts);
+      if (recentTs.length > RECENT) recentTs.shift();
+    }
   }
-  return last;
+  if (contextTokens === null) return null;
+  const lastTurnTs = recentTs.length ? recentTs[recentTs.length - 1] : 0;
+  // turns/hour over the recent window (guard against a zero/tiny span).
+  let turnsPerHour = 0;
+  if (recentTs.length >= 2) {
+    const spanMs = recentTs[recentTs.length - 1] - recentTs[0];
+    if (spanMs > 1000) turnsPerHour = ((recentTs.length - 1) * 3600000) / spanMs;
+  }
+  return { contextTokens, model, lastTurnTs, turnsPerHour };
 }
 
 export interface CompactOpportunity {
@@ -281,36 +307,65 @@ export function startContextWatcher(): ContextWatcherHandle {
         summary.checked++;
         const session = mostRecentSession(a.pid);
         if (!session) continue;
-        let ctx: number | null;
+        let econ: TurnEconomics | null;
         try {
-          ctx = await latestContextTokens(session.file);
+          econ = await latestTurnEconomics(session.file);
         } catch {
           continue;
         }
-        if (ctx === null || ctx <= s.thresholdTokens) continue;
+        if (econ === null) continue;
+
+        // ── TRIGGER (arms): projected per-turn cache-read cost crosses $threshold.
+        const cacheReadPrice = cacheReadPricePerMtok(econ.model);
+        const perTurnCostUsd = (econ.contextTokens * cacheReadPrice) / 1_000_000;
+        if (perTurnCostUsd <= s.dollarPerTurnThreshold) continue;
         summary.flagged++;
 
         const st = state.get(a.role) || { lastNudgedAt: 0, nudgeCount: 0 };
         if (now - st.lastNudgedAt < cooldownMs) continue; // recently (would-)nudged
 
-        const excess = Math.max(0, ctx - s.compactBaselineTokens);
-        const projUsd = ((excess * OPUS_CACHE_READ_PER_MTOK) / 1_000_000).toFixed(2);
+        // ── DECISION (fires): only act when forward savings clearly beat the
+        // handshake overhead, AND the session is actively progressing (else a
+        // session about to idle pays overhead for nothing), weighting rate-of-burn.
+        const activelyProgressing = now - econ.lastTurnTs < s.activeWindowMin * 60 * 1000;
+        // Forward exposure horizon: rate-of-burn over the active window (how many
+        // more turns we'd expect to re-read this context before a natural stop).
+        // Conservative: cap at the turns the active window could hold.
+        const horizonTurns = Math.max(1, Math.min(
+          (econ.turnsPerHour * s.activeWindowMin) / 60,
+          s.activeWindowMin // hard cap so a runaway rate can't inflate savings
+        ));
+        const savedTokensPerTurn = Math.max(0, econ.contextTokens - s.compactBaselineTokens);
+        const forwardSavedTokens = savedTokensPerTurn * horizonTurns;
+        const netSavedTokens = forwardSavedTokens - s.handshakeOverheadTokens;
+        const netSavedUsd = (netSavedTokens * cacheReadPrice) / 1_000_000;
+        const netPositive = netSavedTokens > 0;
+
+        const econStr =
+          `context=${econ.contextTokens} model=${econ.model.replace("claude-", "")} ` +
+          `per_turn_usd=${perTurnCostUsd.toFixed(2)} turns_per_hr=${econ.turnsPerHour.toFixed(1)} ` +
+          `horizon=${horizonTurns.toFixed(1)} net_saved_usd=${netSavedUsd.toFixed(2)} ` +
+          `progressing=${activelyProgressing} ambiguous=${session.ambiguous}`;
+
+        if (!(activelyProgressing && netPositive)) {
+          // Armed by cost, but the decision says don't act (idle, or savings
+          // don't beat overhead). Log it so the economics are observable.
+          logLine(`hold role=${a.role} ${econStr} reason=${!activelyProgressing ? "idle" : "savings<overhead"}`);
+          continue;
+        }
 
         if (s.mode === "observe") {
           summary.wouldNudge++;
           st.lastNudgedAt = now;
           st.nudgeCount++;
           state.set(a.role, st);
-          logLine(
-            `would-nudge role=${a.role} context=${ctx} threshold=${s.thresholdTokens} ` +
-              `excess=${excess} proj_saved_usd=${projUsd} ambiguous=${session.ambiguous} count=${st.nudgeCount}`
-          );
+          logLine(`would-nudge role=${a.role} ${econStr} count=${st.nudgeCount}`);
         } else {
           // mode === "inject": NOT YET ARMED. The idle-gated injection path is
           // built + soak-tested under founder supervision before this fires.
           // Until then, log the intent and do nothing to live terminals.
           logLine(
-            `inject-requested-NOT-ARMED role=${a.role} context=${ctx} ambiguous=${session.ambiguous} ` +
+            `inject-requested-NOT-ARMED role=${a.role} ${econStr} ` +
               `(injection is gated pending founder-supervised soak)`
           );
           st.lastNudgedAt = now;
