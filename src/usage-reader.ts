@@ -32,7 +32,7 @@ import os from "os";
 import readline from "readline";
 import { execFileSync } from "child_process";
 
-const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
+export const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
 // Per-million-token price ESTIMATES (USD). Clearly approximate — edit here or
 // surface as user-editable later. Cost is a secondary signal; raw tokens are
@@ -127,7 +127,7 @@ function addUsage(b: TokenBucket, model: string, u: any): void {
 // cwd of a pid, via lsof. Memoized for the process lifetime — cwd never
 // changes for a running process, and lsof is comparatively slow.
 const cwdCache = new Map<number, string | null>();
-function cwdForPid(pid: number): string | null {
+export function cwdForPid(pid: number): string | null {
   if (cwdCache.has(pid)) return cwdCache.get(pid)!;
   let cwd: string | null = null;
   try {
@@ -149,9 +149,14 @@ function cwdForPid(pid: number): string | null {
 // every non-alphanumeric character with a dash. Verified against the live
 // fleet (spaces and slashes both map to '-'). We derive the name AND confirm
 // the dir exists before trusting it.
-function projectIdFromCwd(cwd: string): string {
+export function projectIdFromCwd(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, "-");
 }
+
+// Opus cache-read list price (USD per million tokens). The context-hygiene
+// projection values "excess" re-read tokens at this rate. Labeled as an
+// estimate wherever surfaced.
+export const OPUS_CACHE_READ_PER_MTOK = PRICES.opus.cacheRead;
 
 function localDate(ts: number): string {
   const d = new Date(ts);

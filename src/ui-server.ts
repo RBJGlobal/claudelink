@@ -18,6 +18,16 @@ import {
   writeSchedulerSettings,
 } from "./scheduler-settings.js";
 import { readFleetUsage, FleetUsage } from "./usage-reader.js";
+import {
+  startContextWatcher,
+  ContextWatcherHandle,
+  projectCompactOpportunity,
+  CompactOpportunity,
+} from "./context-watcher.js";
+import {
+  readContextWatcherSettings,
+  writeContextWatcherSettings,
+} from "./context-watcher-settings.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -179,7 +189,9 @@ function getState(): {
 // real token usage from the local transcripts. Privacy guardrail: only LIVE
 // fleet agents are passed, so we never scan the user's unrelated ~/.claude
 // history. Read-only — no DB writes, no terminal contact.
-async function getUsage(windowDays: number): Promise<FleetUsage> {
+async function getUsage(
+  windowDays: number
+): Promise<FleetUsage & { compactOpportunity: CompactOpportunity }> {
   const db = new Database(DB_PATH, { readonly: true });
   let rows: { role: string; pid: number }[];
   try {
@@ -191,7 +203,15 @@ async function getUsage(windowDays: number): Promise<FleetUsage> {
     db.close();
   }
   const live = rows.filter((r) => isProcessAlive(r.pid));
-  return readFleetUsage(live, windowDays);
+  // Run the meter and the context-hygiene opportunity projection together so
+  // the panel renders the burn AND the fixable portion in one round-trip. The
+  // projection's threshold/baseline track the watcher's settings.
+  const cw = readContextWatcherSettings();
+  const [usage, compactOpportunity] = await Promise.all([
+    readFleetUsage(live, windowDays),
+    projectCompactOpportunity(live, windowDays, cw.thresholdTokens, cw.compactBaselineTokens),
+  ]);
+  return { ...usage, compactOpportunity };
 }
 
 function healOrphans(): { deleted_messages: number; pruned_agents: number } {
@@ -510,7 +530,7 @@ const HTML = String.raw`<!doctype html>
       <div class="usage-trend" id="usage-trend"></div>
       <div id="usage-projects"></div>
       <p class="nudge-hint">
-        Reads each live agent's local Claude Code transcript and totals real token usage per project and per model. Counts are exact (input / output / cache), deduped across forked sessions. The dollar figure is <em>API-equivalent value at list price</em> — on a Max plan you pay a flat fee, so it shows how much consumption the subscription is buying, not a bill. Shows consumption, not your plan's weekly quota ceiling (that's server-side and not exposed locally). Read-only — never writes transcripts or touches terminals.
+        Reads each live agent's local Claude Code transcript and totals real token usage per project and per model. Counts are exact (input / output / cache), deduped across forked sessions. The dollar figure is <em>API-equivalent value at list price</em> — on a Max plan you pay a flat fee, so it shows how much consumption the subscription is buying, not a bill. Shows consumption, not your plan's weekly quota ceiling (that's server-side and not exposed locally). <strong>Compact opportunity</strong> = an upper-bound estimate of the cache-read tokens that compacting over-threshold sessions could avoid re-reading — the fixable slice the context-hygiene watcher targets (the real soak measures the actual delta). Read-only — never writes transcripts or touches terminals.
       </p>
     </div>
   </section>
@@ -858,6 +878,14 @@ function renderUsage(u) {
     '<div class="usage-stat"><div class="label">Cache reads</div><div class="value">' + fmtTokens(t.cacheRead) + '</div><div class="sub">' + fmtTokens(t.cacheCreation) + ' writes</div></div>' +
     '<div class="usage-stat"><div class="label">Models</div><div class="value" style="font-size:13px;font-weight:500;line-height:1.5">' + (models.map(m => '<span class="usage-model-chip">' + escapeHtml(m.replace("claude-","")) + '</span>').join("") || "—") + '</div></div>';
 
+  // Context-hygiene opportunity: the fixable slice of the burn.
+  const co = u.compactOpportunity;
+  if (co) {
+    const thK = Math.round(co.thresholdTokens / 1000);
+    $("usage-summary").innerHTML +=
+      '<div class="usage-stat" style="border-color:var(--accent)"><div class="label">Compact opportunity</div><div class="value">' + fmtUsd(co.estUsdUpperBound) + '</div><div class="sub">upper-bound · ' + co.flaggedTurns.toLocaleString() + ' turns &gt;' + thK + 'K ctx</div></div>';
+  }
+
   // Per-day trend bars (scaled to the busiest day).
   const max = Math.max(1, ...u.fleet.perDay.map(d => d.totalTokens));
   $("usage-trend").innerHTML = u.fleet.perDay.map(d => {
@@ -915,6 +943,7 @@ setInterval(loadUsage, 30000);
 export function startUIServer(port = 7878): http.Server {
   let schedulerHandle: SchedulerHandle | null = null;
   let recoveryWatcherHandle: RecoveryWatcherHandle | null = null;
+  let contextWatcherHandle: ContextWatcherHandle | null = null;
   const server = http.createServer((req, res) => {
     const send = (status: number, body: any, contentType = "application/json") => {
       res.statusCode = status;
@@ -1002,6 +1031,25 @@ export function startUIServer(port = 7878): http.Server {
         req.on("error", (e: any) => send(400, { error: e.message }));
         return;
       }
+      if (req.method === "GET" && p === "/api/context-watcher") {
+        return send(200, readContextWatcherSettings());
+      }
+      if (req.method === "POST" && p === "/api/context-watcher") {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            const next = writeContextWatcherSettings(parsed);
+            if (contextWatcherHandle) contextWatcherHandle.reschedule();
+            send(200, next);
+          } catch (e: any) {
+            send(400, { error: e.message });
+          }
+        });
+        req.on("error", (e: any) => send(400, { error: e.message }));
+        return;
+      }
       if (req.method === "GET" && p === "/api/usage") {
         const raw = parseInt(url.searchParams.get("days") || "7", 10);
         const days = Number.isFinite(raw) ? Math.max(1, Math.min(30, raw)) : 7;
@@ -1048,6 +1096,7 @@ export function startUIServer(port = 7878): http.Server {
     stopNotifier = startMessageNotifier();
     schedulerHandle = startScheduler();
     recoveryWatcherHandle = startRecoveryWatcher();
+    contextWatcherHandle = startContextWatcher();
   }
 
   const writeLock = () => {
@@ -1072,6 +1121,7 @@ export function startUIServer(port = 7878): http.Server {
     stopNotifier();
     if (schedulerHandle) schedulerHandle.stop();
     if (recoveryWatcherHandle) recoveryWatcherHandle.stop();
+    if (contextWatcherHandle) contextWatcherHandle.stop();
     cleanup();
   };
   process.on("SIGTERM", () => { stopAll(); process.exit(0); });
