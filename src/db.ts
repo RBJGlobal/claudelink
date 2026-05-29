@@ -23,6 +23,14 @@ export interface Agent {
   // dir. NULL until the agent's hook fires at least once (hooks must be installed).
   session_id: string | null;
   transcript_path: string | null;
+  // v4: agent-consented checkpoint signal (the SAFETY gate for auto-compact).
+  // The agent calls signal_checkpoint when it's at a real safe boundary; we
+  // store the moment + whether a full clear is safe + a pointer to its handoff.
+  // Instantaneous, not standing — freshness is judged from checkpoint_ts.
+  checkpoint_ts: number | null;
+  checkpoint_safe_to_clear: number;
+  checkpoint_handoff_path: string | null;
+  checkpoint_note: string | null;
 }
 
 export interface RegisterOptions {
@@ -172,6 +180,26 @@ export class NexusDB {
         `);
       });
       applyV3();
+    }
+
+    // v4 — agent-consented checkpoint signal (auto-compact safety gate).
+    // Additive, nullable. Rollback:
+    //   ALTER TABLE agents DROP COLUMN checkpoint_note;
+    //   ALTER TABLE agents DROP COLUMN checkpoint_handoff_path;
+    //   ALTER TABLE agents DROP COLUMN checkpoint_safe_to_clear;
+    //   ALTER TABLE agents DROP COLUMN checkpoint_ts;
+    //   PRAGMA user_version = 3;
+    if (userVersion < 4) {
+      const applyV4 = this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE agents ADD COLUMN checkpoint_ts INTEGER;
+          ALTER TABLE agents ADD COLUMN checkpoint_safe_to_clear INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE agents ADD COLUMN checkpoint_handoff_path TEXT;
+          ALTER TABLE agents ADD COLUMN checkpoint_note TEXT;
+          PRAGMA user_version = 4;
+        `);
+      });
+      applyV4();
     }
   }
 
@@ -412,6 +440,27 @@ export class NexusDB {
     const r = this.db
       .prepare(`UPDATE agents SET autonomous_reply = ? WHERE id = ?`)
       .run(enabled ? 1 : 0, agentId);
+    return r.changes > 0;
+  }
+
+  // Record an agent-consented checkpoint signal (the auto-compact SAFETY gate).
+  // Always stamps a fresh timestamp — the signal is instantaneous, and the
+  // economic side judges freshness from checkpoint_ts. Returns false if no such
+  // agent.
+  setCheckpoint(
+    agentId: string,
+    opts: { safeToClear: boolean; handoffPath: string | null; note: string | null }
+  ): boolean {
+    const r = this.db
+      .prepare(
+        `UPDATE agents
+            SET checkpoint_ts = ?,
+                checkpoint_safe_to_clear = ?,
+                checkpoint_handoff_path = ?,
+                checkpoint_note = ?
+          WHERE id = ?`
+      )
+      .run(Date.now(), opts.safeToClear ? 1 : 0, opts.handoffPath ?? null, opts.note ?? null, agentId);
     return r.changes > 0;
   }
 

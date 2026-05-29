@@ -6,12 +6,26 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { execSync, execFileSync } from "child_process";
+import fs from "fs";
+import path from "path";
+import os from "os";
 import { NexusDB } from "./db.js";
 import { launchUIIfNeeded } from "./ui-launcher.js";
 
 const db = new NexusDB();
 let currentAgentId: string | null = null;
 let currentRole: string | null = null;
+
+// Observe-only audit log for agent-consented checkpoint signals. The auto-
+// compact safety gate: agents emit, ClaudeLink records, NOTHING auto-fires.
+const CHECKPOINT_LOG = path.join(os.homedir(), ".claudelink", "checkpoint.log");
+function appendCheckpointLog(line: string): void {
+  try {
+    fs.appendFileSync(CHECKPOINT_LOG, `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    /* logging never breaks a tool call */
+  }
+}
 
 // Auto-detect the controlling TTY of the parent process (Claude Code itself).
 // The MCP server's own stdin/stdout are pipes (JSON-RPC), so process.stdout.isTTY
@@ -225,6 +239,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: "signal_checkpoint",
+      description:
+        "Signal that you are at a SAFE checkpoint for context management — you just finished a discrete unit of work, your handoff/memory is written, and nothing is in flight. You do NOT need to know your own token count; ClaudeLink measures context cost separately. This is the SAFETY gate: ClaudeLink only ever considers compacting your context at a moment you yourself marked safe. The signal is instantaneous (a fresh checkpoint each time you call it), not a standing flag — re-emit it at each real checkpoint. Currently observe-only: ClaudeLink records the signal; nothing acts on it.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          safe_to_clear: {
+            type: "boolean",
+            description:
+              "true if a FULL CLEAR is safe right now — everything needed to resume is in your handoff file and nothing in live context still matters. false if a summarizing compact would be safer (some live context is still useful).",
+          },
+          handoff_path: {
+            type: "string",
+            description:
+              "Path to your handoff/resume-state file (current task + progress, key decisions you must not lose, exact next step, open threads). This is what you would resume from after a compact/clear.",
+          },
+          note: {
+            type: "string",
+            description: "Optional short note on what you just completed.",
+          },
+        },
+        required: ["safe_to_clear", "handoff_path"],
+      },
+    },
   ],
 }));
 
@@ -395,6 +434,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         return { content: [{ type: "text", text: response }] };
+      }
+
+      case "signal_checkpoint": {
+        const agentId = requireRegistration();
+        const safeToClear = Boolean(args?.safe_to_clear);
+        const handoffPath = (args?.handoff_path as string) || null;
+        const note = (args?.note as string) || null;
+
+        db.setCheckpoint(agentId, { safeToClear, handoffPath, note });
+        appendCheckpointLog(
+          `signal role=${currentRole ?? "?"} agent=${agentId.slice(0, 8)} ` +
+            `safe_to_clear=${safeToClear} handoff=${handoffPath ?? "-"} note=${JSON.stringify(note ?? "")}`
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "Checkpoint recorded (observe-only — no action taken). ClaudeLink will weigh this safe-signal against measured context cost; nothing compacts or clears unless that is separately enabled by the operator.",
+            },
+          ],
+        };
       }
 
       default:
