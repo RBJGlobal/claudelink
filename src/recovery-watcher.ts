@@ -138,7 +138,7 @@ function isProcessAlive(pid: number): boolean {
 
 // Capture the terminal's visible scrollback for the given agent. Returns
 // the last SCROLLBACK_TAIL_CHARS of the buffer, or null on failure.
-function captureScrollback(c: NudgeCandidate): string | null {
+export function captureScrollback(c: NudgeCandidate): string | null {
   const app = (c.terminal_app || "").toLowerCase();
   try {
     if (app === "iterm2") {
