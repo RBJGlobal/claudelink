@@ -465,10 +465,18 @@ export function startContextWatcher(): ContextWatcherHandle {
           state.set(a.role, st);
           logLine(`would-nudge role=${a.role} ${econStr} count=${st.nudgeCount}`);
         } else {
-          // ARMED INJECT (mode "inject"): we already passed the ECONOMIC gate
-          // (perTurnCost > threshold) to reach here. Now the SAFETY stack — and
-          // note compaction wants the agent IDLE, the opposite of the nudge
-          // path. ALL must hold before we type into a live terminal:
+          // ARMED INJECT (mode "inject"). FAIL-CLOSED ALLOWLIST FIRST: only
+          // roles the operator explicitly put on injectAllowlist are ever
+          // auto-compacted. An empty/unset list arms NO ONE — this is what makes
+          // a standing-on rollout a controlled subset, not fleet-wide. Checked
+          // before the transcript scan so non-listed agents are skipped cheaply.
+          if (!s.injectAllowlist.includes(a.role)) {
+            logLine(`inject-skip role=${a.role} reason=not-in-allowlist allowlist=${JSON.stringify(s.injectAllowlist)}`);
+            continue;
+          }
+          // Then the SAFETY stack — and note compaction wants the agent IDLE,
+          // the opposite of the nudge path. ALL must hold before we type into a
+          // live terminal:
           //   - fresh consent: agent signaled a checkpoint within K real turns
           //     (it hasn't worked far past the handoff it wrote);
           //   - idle: last turn ENDED + quiet (not mid-turn / mid-tool-call);

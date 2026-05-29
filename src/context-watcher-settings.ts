@@ -43,6 +43,11 @@ export interface ContextWatcherSettings {
   compactBaselineTokens: number; // assumed post-compact size, for projection
   cooldownMin: number; // min gap between nudges to the same session
   message: string;
+  // Role allowlist for ARMED inject (the "controlled subset"). FAIL-CLOSED:
+  // an empty/unset list fires on NO ONE. Only roles explicitly listed here are
+  // ever auto-compacted, regardless of all the other gates. This is what makes
+  // a standing-on rollout a controlled subset rather than fleet-wide.
+  injectAllowlist: string[];
   // One-shot LATCH for armed inject: fire on the first qualifying agent, then
   // auto-disable (set enabled=false) and log loudly. NOT a cooldown — a single
   // demonstration shot, so arming can't become a standing fleet loop by accident.
@@ -64,9 +69,15 @@ const DEFAULTS: ContextWatcherSettings = {
   compactBaselineTokens: 60000,
   cooldownMin: 30,
   message: "/compact",
+  injectAllowlist: [], // fail-closed: empty = arm nobody
   oneShot: true,
   activeSince: null,
 };
+
+function cleanAllowlist(v: any): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x) => typeof x === "string" && x.trim().length > 0);
+}
 
 function clampInt(n: number, lo: number, hi: number, dflt: number): number {
   if (Number.isNaN(n)) return dflt;
@@ -94,6 +105,7 @@ export function readContextWatcherSettings(): ContextWatcherSettings {
         typeof parsed.message === "string" && parsed.message.length > 0
           ? parsed.message
           : DEFAULTS.message,
+      injectAllowlist: cleanAllowlist(parsed.injectAllowlist),
       oneShot: parsed.oneShot === undefined ? DEFAULTS.oneShot : Boolean(parsed.oneShot),
       activeSince:
         typeof parsed.activeSince === "string" && parsed.activeSince.length > 0
@@ -144,6 +156,7 @@ export function writeContextWatcherSettings(
       partial.message !== undefined && typeof partial.message === "string" && partial.message.length > 0
         ? partial.message
         : current.message,
+    injectAllowlist: partial.injectAllowlist !== undefined ? cleanAllowlist(partial.injectAllowlist) : current.injectAllowlist,
     oneShot: partial.oneShot !== undefined ? Boolean(partial.oneShot) : current.oneShot,
     activeSince:
       partial.activeSince !== undefined
