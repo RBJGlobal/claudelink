@@ -398,6 +398,17 @@ const HTML = String.raw`<!doctype html>
   .usage-bar:hover { opacity: 1; }
   .usage-bar .cap { position: absolute; top: -16px; left: 0; right: 0; text-align: center; font-size: 9px; color: var(--muted); }
   .usage-bar .day { position: absolute; bottom: -16px; left: 0; right: 0; text-align: center; font-size: 9px; color: var(--muted); }
+  /* single-day distribution donut (replaces the degenerate one-bar trend) */
+  .usage-trend.donut-mode { height: auto; align-items: center; gap: 28px; padding: 14px 16px; flex-wrap: wrap; }
+  .usage-donut { width: 150px; height: 150px; border-radius: 50%; position: relative; flex: none; }
+  .usage-donut::after { content: ''; position: absolute; inset: 34px; border-radius: 50%; background: var(--panel); }
+  .donut-center { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 600; color: var(--text); z-index: 1; }
+  .usage-donut-legend { display: flex; flex-direction: column; gap: 6px; font-size: 12px; min-width: 240px; flex: 1; }
+  .donut-leg-item { display: flex; align-items: center; gap: 8px; }
+  .donut-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .donut-name { color: var(--text); }
+  .donut-pct { color: var(--muted); margin-left: auto; }
+  .donut-tok { color: var(--muted); font-family: ui-monospace, Menlo, monospace; min-width: 64px; text-align: right; }
   .usage-proj { width: 100%; border-collapse: collapse; margin: 6px 0 4px; }
   .usage-proj th { text-align: left; color: var(--muted); font-size: 11px; font-weight: 500; padding: 6px 16px; border-bottom: 1px solid var(--border); }
   .usage-proj td { padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text); vertical-align: top; }
@@ -907,13 +918,37 @@ function renderUsage(u) {
       '<div class="usage-stat" style="border-color:var(--accent)"><div class="label">Compact opportunity</div><div class="value">' + fmtUsd(co.estUsdUpperBound) + '</div><div class="sub">upper-bound · ' + co.flaggedTurns.toLocaleString() + ' turns &gt;' + thK + 'K ctx</div></div>';
   }
 
-  // Per-day trend bars (scaled to the busiest day).
-  const max = Math.max(1, ...u.fleet.perDay.map(d => d.totalTokens));
-  $("usage-trend").innerHTML = u.fleet.perDay.map(d => {
-    const h = Math.round((d.totalTokens / max) * 100);
-    const dd = d.date.slice(5); // MM-DD
-    return '<div class="usage-bar" style="height:' + h + '%" title="' + d.date + ': ' + fmtTokens(d.totalTokens) + ' tok · ' + fmtUsd(d.estCostUsd) + '"><span class="cap">' + (d.totalTokens ? fmtTokens(d.totalTokens) : '') + '</span><span class="day">' + dd + '</span></div>';
-  }).join("");
+  // Trend visualization adapts to the window. A single day makes a per-day bar
+  // a meaningless full-width strip, so for "Today" show a per-project DONUT
+  // (where today's burn went) instead. Multi-day keeps the per-day trend bars.
+  const trendEl = $("usage-trend");
+  if (u.windowDays <= 1) {
+    trendEl.className = "usage-trend donut-mode";
+    const projs = u.projects.filter(p => p.totals.totalTokens > 0);
+    const tot = projs.reduce((s, p) => s + p.totals.totalTokens, 0) || 1;
+    const palette = ['#b89cff','#6bb1ff','#3ddc84','#ffb454','#ff6b6b','#9b8cff','#5ac8c8','#ff9cce'];
+    let acc = 0;
+    const stops = projs.map((p, i) => {
+      const start = (acc / tot) * 360; acc += p.totals.totalTokens; const end = (acc / tot) * 360;
+      return palette[i % palette.length] + ' ' + start.toFixed(2) + 'deg ' + end.toFixed(2) + 'deg';
+    }).join(', ');
+    const legend = projs.map((p, i) => {
+      const pct = (p.totals.totalTokens / tot) * 100;
+      const name = escapeHtml(p.label.split(' (')[0]);
+      return '<div class="donut-leg-item"><span class="donut-swatch" style="background:' + palette[i % palette.length] + '"></span><span class="donut-name">' + name + '</span><span class="donut-pct">' + pct.toFixed(0) + '%</span><span class="donut-tok">' + fmtTokens(p.totals.totalTokens) + '</span></div>';
+    }).join('');
+    trendEl.innerHTML = projs.length
+      ? '<div class="usage-donut" style="background:conic-gradient(' + stops + ')"><span class="donut-center">' + fmtTokens(tot) + '</span></div><div class="usage-donut-legend">' + legend + '</div>'
+      : '<div style="color:var(--muted)">No usage in this window.</div>';
+  } else {
+    trendEl.className = "usage-trend";
+    const max = Math.max(1, ...u.fleet.perDay.map(d => d.totalTokens));
+    trendEl.innerHTML = u.fleet.perDay.map(d => {
+      const h = Math.round((d.totalTokens / max) * 100);
+      const dd = d.date.slice(5); // MM-DD
+      return '<div class="usage-bar" style="height:' + h + '%" title="' + d.date + ': ' + fmtTokens(d.totalTokens) + ' tok · ' + fmtUsd(d.estCostUsd) + '"><span class="cap">' + (d.totalTokens ? fmtTokens(d.totalTokens) : '') + '</span><span class="day">' + dd + '</span></div>';
+    }).join("");
+  }
 
   // Per-project table, heaviest first.
   let rows = u.projects.map(pr => {
