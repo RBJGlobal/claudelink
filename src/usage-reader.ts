@@ -215,13 +215,38 @@ async function scanTranscript(
   perDay: Map<string, { totalTokens: number; estCostUsd: number }>,
   seen: Set<string>,
   opp: OppAccumulator,
-  fileBucket: TokenBucket
+  fileBucket: TokenBucket,
+  fileInfo: { registerRole: string | null }
 ): Promise<void> {
   const rl = readline.createInterface({
     input: fs.createReadStream(file, { encoding: "utf-8" }),
     crlfDelay: Infinity,
   });
   for await (const line of rl) {
+    // Capture the agent's self-identified role: each session registers through
+    // ClaudeLink, so the transcript contains its own register tool_use with the
+    // role. This labels per-session sub-rows by registered name with no
+    // dependence on the deploy/session-capture. Cheap-gated on the substring.
+    if (fileInfo.registerRole === null && line.indexOf("register") !== -1) {
+      try {
+        const ro = JSON.parse(line);
+        const content = ro?.message?.content;
+        if (Array.isArray(content)) {
+          for (const b of content) {
+            if (
+              b && b.type === "tool_use" &&
+              typeof b.name === "string" && b.name.includes("register") &&
+              b.input && typeof b.input.role === "string" && b.input.role
+            ) {
+              fileInfo.registerRole = b.input.role;
+              break;
+            }
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
     // Cheap pre-filter: skip lines that obviously can't carry usage.
     if (line.indexOf('"usage"') === -1) continue;
     let o: any;
@@ -366,16 +391,20 @@ export async function readFleetUsage(
       }
       proj.sessions++;
       const fileBucket = emptyBucket();
-      await scanTranscript(file, windowStartMs, proj, perDay, seen, opp, fileBucket);
+      const fileInfo: { registerRole: string | null } = { registerRole: null };
+      await scanTranscript(file, windowStartMs, proj, perDay, seen, opp, fileBucket, fileInfo);
       if (fileBucket.totalTokens > 0) {
         const sessionId = path.basename(file).replace(/\.jsonl$/, "");
-        // Label: exact agent role if this transcript maps to one; for a
-        // single-agent project the (only) agent owns its sessions; otherwise an
-        // unattributed session stub (names light up once capture is populated).
+        // Label priority: (1) exact session-capture map; (2) the agent's own
+        // register call found in the transcript (works NOW, no deploy);
+        // (3) single-agent project owns its sessions; (4) session-id stub.
         let label: string;
         let mapped: boolean;
         if (pathRole.has(file)) {
           label = pathRole.get(file)!;
+          mapped = true;
+        } else if (fileInfo.registerRole) {
+          label = fileInfo.registerRole;
           mapped = true;
         } else if (roles.length === 1) {
           label = roles[0];

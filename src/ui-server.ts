@@ -1025,9 +1025,10 @@ function renderProjectTable(u) {
           '<td></td>' +
         '</tr>';
       }).join("");
-      // If any session is unattributed, note that names fill in post session-capture.
+      // If any session is unattributed, explain why (no register call found —
+      // e.g. a resumed/forked session); the rest are labeled by registered name.
       if (pr.breakdown.some(s => !s.mapped)) {
-        html += '<tr class="usage-subrow"><td colspan="4" style="font-style:italic;color:var(--muted)">Agent names fill in once session-capture is live (after deploy + each agent\'s first hook fire).</td></tr>';
+        html += '<tr class="usage-subrow"><td colspan="4" style="font-style:italic;color:var(--muted)">A "session …" row had no register call in its transcript (e.g. a resumed or forked session) — the rest are by registered agent name.</td></tr>';
       }
     }
     return html;
