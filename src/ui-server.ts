@@ -200,19 +200,32 @@ const usageInflight = new Map<number, Promise<FleetUsage>>();
 
 async function computeUsage(windowDays: number): Promise<FleetUsage> {
   const db = new Database(DB_PATH, { readonly: true });
-  let rows: { role: string; pid: number }[];
+  let rows: { role: string; pid: number; transcript_path: string | null }[];
   try {
-    rows = db.prepare(`SELECT role, pid FROM agents`).all() as {
-      role: string;
-      pid: number;
-    }[];
+    try {
+      rows = db.prepare(`SELECT role, pid, transcript_path FROM agents`).all() as {
+        role: string;
+        pid: number;
+        transcript_path: string | null;
+      }[];
+    } catch {
+      // Pre-migration DB (live MCP servers still on the old schema, no v3
+      // transcript_path column yet). Fall back — per-session breakdown then
+      // labels by session-id, and lights up by agent role once deployed.
+      rows = (db.prepare(`SELECT role, pid FROM agents`).all() as { role: string; pid: number }[]).map(
+        (r) => ({ ...r, transcript_path: null })
+      );
+    }
   } finally {
     db.close();
   }
-  const live = rows.filter((r) => isProcessAlive(r.pid));
+  const live = rows
+    .filter((r) => isProcessAlive(r.pid))
+    .map((r) => ({ role: r.role, pid: r.pid, transcriptPath: r.transcript_path }));
   // Single transcript pass computes BOTH the meter and the compact-opportunity
   // (the projection's threshold/baseline track the watcher's settings) — no
-  // second full scan.
+  // second full scan. transcriptPath (when populated) labels per-session
+  // breakdown by agent role.
   const cw = readContextWatcherSettings();
   return readFleetUsage(live, windowDays, cw.thresholdTokens, cw.compactBaselineTokens);
 }
@@ -433,6 +446,14 @@ const HTML = String.raw`<!doctype html>
   .usage-proj tr:last-child td { border-bottom: none; }
   .usage-model-chip { display: inline-block; background: rgba(184,156,255,0.14); color: var(--accent); border-radius: 8px; padding: 1px 7px; font-size: 10px; margin: 1px 3px 1px 0; font-family: ui-monospace, Menlo, monospace; }
   .usage-roles { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  /* per-project + expand → per-session/agent sub-rows */
+  .proj-expand { display: inline-flex; align-items: center; justify-content: center; background: var(--panel-2); border: 1px solid var(--border); color: var(--accent); width: 18px; height: 18px; border-radius: 4px; font-size: 13px; line-height: 1; cursor: pointer; margin-right: 8px; padding: 0; vertical-align: middle; }
+  .proj-expand:hover { border-color: var(--accent); }
+  .proj-expand-spacer { display: inline-block; width: 18px; margin-right: 8px; }
+  .usage-subrow td { background: rgba(184,156,255,0.05); font-size: 12px; padding-top: 6px; padding-bottom: 6px; }
+  .usage-subrow td:first-child { padding-left: 42px; }
+  .usage-subrow .sub-name { color: var(--text); }
+  .usage-subrow .sub-unmapped { color: var(--muted); font-style: italic; }
   .auto-reply-cell { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; user-select: none; }
   .auto-reply-cell input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent); margin: 0; }
   .auto-reply-cell .lbl { font-size: 11px; color: var(--muted); min-width: 22px; }
@@ -967,18 +988,49 @@ function renderUsage(u) {
     }).join("");
   }
 
-  // Per-project table, heaviest first.
+  // Per-project table (heaviest first), with a + expand for per-session/agent.
+  lastUsage = u;
+  renderProjectTable(u);
+}
+
+let lastUsage = null;
+const expandedProjects = new Set();
+function renderProjectTable(u) {
   let rows = u.projects.map(pr => {
     const chips = Object.keys(pr.perModel).sort().map(m =>
       '<span class="usage-model-chip">' + escapeHtml(m.replace("claude-","")) + ' ' + fmtTokens(pr.perModel[m].totalTokens) + '</span>').join("");
+    // Expandable only when there's more than one session to break out.
+    const expandable = pr.breakdown && pr.breakdown.length > 1;
+    const isExp = expandedProjects.has(pr.projectId);
+    const toggle = expandable
+      ? '<button class="proj-expand" data-proj="' + escapeHtml(pr.projectId) + '" title="Show per-agent / per-session">' + (isExp ? '−' : '+') + '</button>'
+      : '<span class="proj-expand-spacer"></span>';
     const rolesLine = pr.agentRoles.length > 1
       ? '<div class="usage-roles">' + escapeHtml(pr.agentRoles.join(", ")) + '</div>' : "";
-    return '<tr>' +
-      '<td>' + escapeHtml(pr.label) + rolesLine + '</td>' +
+    let html = '<tr>' +
+      '<td>' + toggle + escapeHtml(pr.label) + rolesLine + '</td>' +
       '<td class="num">' + fmtTokens(pr.totals.totalTokens) + '</td>' +
       '<td class="num">' + fmtUsd(pr.totals.estCostUsd) + '</td>' +
       '<td>' + (chips || "—") + '</td>' +
     '</tr>';
+    if (expandable && isExp) {
+      html += pr.breakdown.map(s => {
+        const nm = s.mapped
+          ? '<span class="sub-name">' + escapeHtml(s.label) + '</span>'
+          : '<span class="sub-unmapped">' + escapeHtml(s.label) + '</span>';
+        return '<tr class="usage-subrow">' +
+          '<td>' + nm + '</td>' +
+          '<td class="num">' + fmtTokens(s.totalTokens) + '</td>' +
+          '<td class="num">' + fmtUsd(s.estCostUsd) + '</td>' +
+          '<td></td>' +
+        '</tr>';
+      }).join("");
+      // If any session is unattributed, note that names fill in post session-capture.
+      if (pr.breakdown.some(s => !s.mapped)) {
+        html += '<tr class="usage-subrow"><td colspan="4" style="font-style:italic;color:var(--muted)">Agent names fill in once session-capture is live (after deploy + each agent\'s first hook fire).</td></tr>';
+      }
+    }
+    return html;
   }).join("");
   if (!rows) rows = '<tr><td colspan="4" style="color:var(--muted)">No in-window usage found for live fleet agents.</td></tr>';
   let note = "";
@@ -1022,6 +1074,16 @@ loadUsage();
 // Transcript parsing is heavy + server-cached (5 min TTL); refresh on a slow
 // cadence so we mostly serve the cache and never overlap a scan.
 setInterval(loadUsage, 120000);
+
+// --- Project expand (+) → per-session / per-agent breakdown ---
+$("usage-projects").addEventListener("click", (e) => {
+  const btn = e.target.closest(".proj-expand");
+  if (!btn) return;
+  const id = btn.getAttribute("data-proj");
+  if (expandedProjects.has(id)) expandedProjects.delete(id);
+  else expandedProjects.add(id);
+  if (lastUsage) renderProjectTable(lastUsage); // re-render from cached data, no refetch
+});
 
 // --- Tabs ---
 document.querySelectorAll(".tab").forEach((btn) => {

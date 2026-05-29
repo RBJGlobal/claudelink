@@ -65,6 +65,17 @@ export interface TokenBucket {
   totalTokens: number;
   estCostUsd: number;
 }
+// Per-session sub-row for the table's expand (+). Labeled with the agent ROLE
+// when the session maps to a known agent (single-agent project, or shared-repo
+// once session-capture/transcript_path is populated); otherwise a session-id
+// stub so the distribution is still visible.
+export interface SessionUsage {
+  sessionId: string;
+  label: string;
+  mapped: boolean; // true = label is a real agent role; false = unattributed session
+  totalTokens: number;
+  estCostUsd: number;
+}
 export interface ProjectUsage {
   projectId: string;
   cwd: string;
@@ -73,6 +84,7 @@ export interface ProjectUsage {
   sessions: number;
   totals: TokenBucket;
   perModel: Record<string, TokenBucket>;
+  breakdown: SessionUsage[]; // per-session, heaviest first (for the + expand)
 }
 export interface PerDayPoint {
   date: string; // YYYY-MM-DD (local)
@@ -108,6 +120,10 @@ export interface FleetUsage {
 export interface AgentRef {
   role: string;
   pid: number;
+  // From session-capture (v4). When present, maps this agent to its EXACT
+  // session transcript so per-agent breakdown is labeled by role even in a
+  // shared repo dir. NULL until the hook fires post-deploy.
+  transcriptPath?: string | null;
 }
 
 function emptyBucket(): TokenBucket {
@@ -198,7 +214,8 @@ async function scanTranscript(
   proj: ProjectUsage,
   perDay: Map<string, { totalTokens: number; estCostUsd: number }>,
   seen: Set<string>,
-  opp: OppAccumulator
+  opp: OppAccumulator,
+  fileBucket: TokenBucket
 ): Promise<void> {
   const rl = readline.createInterface({
     input: fs.createReadStream(file, { encoding: "utf-8" }),
@@ -249,6 +266,7 @@ async function scanTranscript(
     addUsage(proj.totals, model, u);
     if (!proj.perModel[model]) proj.perModel[model] = emptyBucket();
     addUsage(proj.perModel[model], model, u);
+    addUsage(fileBucket, model, u); // per-session total for the + expand
 
     // Fleet per-day trend (across all projects). Tallied separately from the
     // project buckets so a zero-filled dense series is easy to emit later.
@@ -282,8 +300,11 @@ export async function readFleetUsage(
     excessTokens: 0,
   };
 
-  // Map live agents -> project dirs, grouping agents that share a cwd.
-  const byProject = new Map<string, { cwd: string; projectId: string; roles: string[] }>();
+  // Map live agents -> project dirs, grouping agents that share a cwd. pathRole
+  // maps a captured transcript_path to its agent role, so per-session sub-rows
+  // can be labeled by agent even in a shared repo dir (once session-capture is
+  // populated).
+  const byProject = new Map<string, { cwd: string; projectId: string; roles: string[]; pathRole: Map<string, string> }>();
   const skippedNoCwd: string[] = [];
   for (const a of agents) {
     const cwd = cwdForPid(a.pid);
@@ -297,8 +318,9 @@ export async function readFleetUsage(
       skippedNoCwd.push(a.role);
       continue;
     }
-    const entry = byProject.get(projectId) || { cwd, projectId, roles: [] };
+    const entry = byProject.get(projectId) || { cwd, projectId, roles: [], pathRole: new Map<string, string>() };
     entry.roles.push(a.role);
+    if (a.transcriptPath) entry.pathRole.set(a.transcriptPath, a.role);
     byProject.set(projectId, entry);
   }
 
@@ -308,7 +330,7 @@ export async function readFleetUsage(
   // message re-emitted in a forked session is counted exactly once.
   const seen = new Set<string>();
 
-  for (const { cwd, projectId, roles } of byProject.values()) {
+  for (const { cwd, projectId, roles, pathRole } of byProject.values()) {
     const dir = path.join(PROJECTS_DIR, projectId);
     const proj: ProjectUsage = {
       projectId,
@@ -321,6 +343,7 @@ export async function readFleetUsage(
       sessions: 0,
       totals: emptyBucket(),
       perModel: {},
+      breakdown: [],
     };
 
     let files: string[] = [];
@@ -342,8 +365,35 @@ export async function readFleetUsage(
         continue;
       }
       proj.sessions++;
-      await scanTranscript(file, windowStartMs, proj, perDay, seen, opp);
+      const fileBucket = emptyBucket();
+      await scanTranscript(file, windowStartMs, proj, perDay, seen, opp, fileBucket);
+      if (fileBucket.totalTokens > 0) {
+        const sessionId = path.basename(file).replace(/\.jsonl$/, "");
+        // Label: exact agent role if this transcript maps to one; for a
+        // single-agent project the (only) agent owns its sessions; otherwise an
+        // unattributed session stub (names light up once capture is populated).
+        let label: string;
+        let mapped: boolean;
+        if (pathRole.has(file)) {
+          label = pathRole.get(file)!;
+          mapped = true;
+        } else if (roles.length === 1) {
+          label = roles[0];
+          mapped = true;
+        } else {
+          label = "session " + sessionId.slice(0, 8);
+          mapped = false;
+        }
+        proj.breakdown.push({
+          sessionId,
+          label,
+          mapped,
+          totalTokens: fileBucket.totalTokens,
+          estCostUsd: fileBucket.estCostUsd,
+        });
+      }
     }
+    proj.breakdown.sort((a, b) => b.totalTokens - a.totalTokens);
 
     projects.push(proj);
   }
