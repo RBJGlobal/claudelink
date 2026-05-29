@@ -6,12 +6,15 @@
 //
 // SAFETY POSTURE (this types into LIVE terminals once armed):
 //   - mode "observe" (default): detect + log "would-nudge" + project savings.
-//     NEVER injects. This is what runs now — zero risk to the working fleet.
-//   - mode "inject": currently a GUARDED STUB. It logs that injection is not
-//     yet armed rather than typing into terminals. The real injection path
-//     (idle-gate via scrollback + injectKeystroke + cooldown + escalate) is
-//     built and soak-tested under founder supervision before this is armed —
-//     a /compact landing mid-turn would corrupt that turn.
+//     NEVER injects. Zero risk to the working fleet.
+//   - mode "inject" (ARMED, founder-gated): types s.message (default /compact)
+//     into a terminal ONLY when ALL gates hold — economic (perTurnCost over
+//     threshold) + fresh consent (a signal_checkpoint within K real turns) +
+//     idle (last turn ENDED, not mid-turn) + verified handoff + not an
+//     ambiguous shared-repo session. With oneShot (default), it fires once then
+//     auto-disables (latch) so arming can't become a standing fleet loop.
+//   - Settings default to enabled=false: nothing runs/injects until the
+//     operator explicitly enables + flips mode to inject.
 //
 // Detection metric: a turn's input-side tokens (input + cache_read +
 // cache_creation) = the prompt size being re-sent = context occupancy.
@@ -32,8 +35,17 @@ import {
 } from "./usage-reader.js";
 import {
   readContextWatcherSettings,
+  writeContextWatcherSettings,
   ContextWatcherSettings,
 } from "./context-watcher-settings.js";
+import { injectKeystroke, NudgeCandidate } from "./scheduler.js";
+import { verifyHandoff } from "./compact-executor.js";
+
+// Safety gate for armed inject: the agent's consent signal must be within this
+// many real turns of "now" (it hasn't worked far past the checkpoint its
+// handoff describes). Turns, not wall-clock — an idle agent that signaled and
+// hasn't moved is still at its safe checkpoint.
+const MAX_TURNS_SINCE_SIGNAL = 5;
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -62,8 +74,12 @@ interface SessionRef {
 }
 
 interface WatchedAgent {
+  id: string;
   role: string;
   pid: number;
+  tty: string | null;
+  terminal_app: string | null;
+  pane_id: string | null;
   session_id: string | null;
   transcript_path: string | null;
   checkpoint_ts: number | null;
@@ -292,6 +308,49 @@ export async function projectCompactOpportunity(
   };
 }
 
+// Armed-inject safety read: is the agent idle (last turn ENDED, quiet ≥15s,
+// not mid-tool-call) and how many real turns has it taken since its consent
+// signal? Streams the session transcript once. Used only in the inject path.
+async function armGate(
+  file: string,
+  checkpointTs: number | null
+): Promise<{ idle: boolean; turnsSinceSignal: number; detail: string }> {
+  let last: { type: string; stop: string | null; ts: number; toolUse: boolean } | null = null;
+  let turnsSince = 0;
+  const rl = readline.createInterface({
+    input: fs.createReadStream(file, { encoding: "utf-8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of rl) {
+    if (line.indexOf('"type"') === -1) continue;
+    let o: any;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (o.type !== "user" && o.type !== "assistant") continue;
+    const m = o.message || {};
+    let toolUse = false;
+    if (Array.isArray(m.content)) for (const b of m.content) if (b && b.type === "tool_use") toolUse = true;
+    const ts = Date.parse(o.timestamp || "") || 0;
+    last = { type: o.type, stop: m.stop_reason ?? null, ts, toolUse };
+    if (checkpointTs != null && ts > checkpointTs) turnsSince++;
+  }
+  if (!last) return { idle: false, turnsSinceSignal: 999, detail: "no real turns" };
+  const ageSec = (Date.now() - last.ts) / 1000;
+  const idle =
+    last.type === "assistant" &&
+    (last.stop === "end_turn" || last.stop === "stop_sequence") &&
+    !last.toolUse &&
+    ageSec >= 15;
+  return {
+    idle,
+    turnsSinceSignal: turnsSince,
+    detail: `last=${last.type}/${last.stop} age=${ageSec.toFixed(0)}s turnsSinceSignal=${turnsSince}`,
+  };
+}
+
 interface SessionState {
   lastNudgedAt: number;
   nudgeCount: number;
@@ -317,7 +376,7 @@ export function startContextWatcher(): ContextWatcherHandle {
   const liveAgents = (): WatchedAgent[] => {
     const rows = openDb()
       .prepare(
-        `SELECT role, pid, session_id, transcript_path,
+        `SELECT id, role, pid, tty, terminal_app, pane_id, session_id, transcript_path,
                 checkpoint_ts, checkpoint_safe_to_clear, checkpoint_handoff_path
            FROM agents`
       )
@@ -393,29 +452,59 @@ export function startContextWatcher(): ContextWatcherHandle {
           `signal_age_min=${ckMin} safe_to_clear=${a.checkpoint_safe_to_clear} ` +
           `safety_gate=${safetyFresh} economic_gate=${economicGreen} both_gates_green=${bothGreen}`;
 
-        if (!(activelyProgressing && netPositive)) {
-          // Armed by cost, but the decision says don't act (idle, or savings
-          // don't beat overhead). Log it so the economics are observable.
-          logLine(`hold role=${a.role} ${econStr} reason=${!activelyProgressing ? "idle" : "savings<overhead"}`);
-          continue;
-        }
-
         if (s.mode === "observe") {
+          // Nudge path: gate on the session being actively progressing (don't
+          // pay handshake overhead on one about to idle) + net-positive.
+          if (!(activelyProgressing && netPositive)) {
+            logLine(`hold role=${a.role} ${econStr} reason=${!activelyProgressing ? "idle" : "savings<overhead"}`);
+            continue;
+          }
           summary.wouldNudge++;
           st.lastNudgedAt = now;
           st.nudgeCount++;
           state.set(a.role, st);
           logLine(`would-nudge role=${a.role} ${econStr} count=${st.nudgeCount}`);
         } else {
-          // mode === "inject": NOT YET ARMED. The idle-gated injection path is
-          // built + soak-tested under founder supervision before this fires.
-          // Until then, log the intent and do nothing to live terminals.
-          logLine(
-            `inject-requested-NOT-ARMED role=${a.role} ${econStr} ` +
-              `(injection is gated pending founder-supervised soak)`
-          );
+          // ARMED INJECT (mode "inject"): we already passed the ECONOMIC gate
+          // (perTurnCost > threshold) to reach here. Now the SAFETY stack — and
+          // note compaction wants the agent IDLE, the opposite of the nudge
+          // path. ALL must hold before we type into a live terminal:
+          //   - fresh consent: agent signaled a checkpoint within K real turns
+          //     (it hasn't worked far past the handoff it wrote);
+          //   - idle: last turn ENDED + quiet (not mid-turn / mid-tool-call);
+          //   - handoff verified non-trivial;
+          //   - NOT an ambiguous shared-repo session (can't safely target it).
+          const ag = await armGate(session.file, a.checkpoint_ts);
+          const freshConsent =
+            a.checkpoint_ts != null && ag.turnsSinceSignal <= MAX_TURNS_SINCE_SIGNAL;
+          const handoffOk = !!a.checkpoint_handoff_path && verifyHandoff(a.checkpoint_handoff_path).ok;
+          const gates = `idle=${ag.idle} freshConsent=${freshConsent}(${ag.detail}) handoff=${handoffOk} ambiguous=${session.ambiguous}`;
+          if (!(ag.idle && freshConsent && handoffOk && !session.ambiguous)) {
+            logLine(`inject-skip role=${a.role} ${econStr} ${gates}`);
+            continue;
+          }
+          // ALL GATES GREEN — inject the consented action (one shot).
+          const candidate: NudgeCandidate = {
+            id: a.id,
+            role: a.role,
+            tty: a.tty || "",
+            terminal_app: a.terminal_app,
+            pane_id: a.pane_id,
+            pid: a.pid,
+          };
+          const result = injectKeystroke(candidate, s.message);
+          summary.injected++;
           st.lastNudgedAt = now;
+          st.nudgeCount++;
           state.set(a.role, st);
+          logLine(`ARMED-FIRE role=${a.role} action=${JSON.stringify(s.message)} result=${result} ${econStr} ${gates}`);
+          if (s.oneShot) {
+            // One-shot latch: disable the watcher after the first fire so this
+            // can't become a standing fleet loop. Re-enable to fire again.
+            writeContextWatcherSettings({ enabled: false });
+            logLine(`ONE-SHOT LATCH: fired on ${a.role}; watcher disabled (enabled=false).`);
+            break;
+          }
         }
       }
       return summary;

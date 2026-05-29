@@ -43,6 +43,10 @@ export interface ContextWatcherSettings {
   compactBaselineTokens: number; // assumed post-compact size, for projection
   cooldownMin: number; // min gap between nudges to the same session
   message: string;
+  // One-shot LATCH for armed inject: fire on the first qualifying agent, then
+  // auto-disable (set enabled=false) and log loudly. NOT a cooldown — a single
+  // demonstration shot, so arming can't become a standing fleet loop by accident.
+  oneShot: boolean;
   // ISO timestamp marking the start of a "watcher-active" measurement window,
   // so the meter can attribute a clean before/after. Manually settable so an
   // experiment has crisp window edges (not just an auto-stamp on enable).
@@ -60,6 +64,7 @@ const DEFAULTS: ContextWatcherSettings = {
   compactBaselineTokens: 60000,
   cooldownMin: 30,
   message: "/compact",
+  oneShot: true,
   activeSince: null,
 };
 
@@ -89,6 +94,7 @@ export function readContextWatcherSettings(): ContextWatcherSettings {
         typeof parsed.message === "string" && parsed.message.length > 0
           ? parsed.message
           : DEFAULTS.message,
+      oneShot: parsed.oneShot === undefined ? DEFAULTS.oneShot : Boolean(parsed.oneShot),
       activeSince:
         typeof parsed.activeSince === "string" && parsed.activeSince.length > 0
           ? parsed.activeSince
@@ -138,6 +144,7 @@ export function writeContextWatcherSettings(
       partial.message !== undefined && typeof partial.message === "string" && partial.message.length > 0
         ? partial.message
         : current.message,
+    oneShot: partial.oneShot !== undefined ? Boolean(partial.oneShot) : current.oneShot,
     activeSince:
       partial.activeSince !== undefined
         ? (typeof partial.activeSince === "string" && partial.activeSince.length > 0 ? partial.activeSince : null)
