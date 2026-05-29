@@ -17,7 +17,7 @@ import {
   readSchedulerSettings,
   writeSchedulerSettings,
 } from "./scheduler-settings.js";
-import { readFleetUsage, FleetUsage } from "./usage-reader.js";
+import { readFleetUsage, FleetUsage, readAgentTimelines, AgentTimeline } from "./usage-reader.js";
 import {
   startContextWatcher,
   ContextWatcherHandle,
@@ -242,6 +242,42 @@ async function getUsage(windowDays: number): Promise<FleetUsage> {
     })
     .finally(() => usageInflight.delete(windowDays));
   usageInflight.set(windowDays, p);
+  return p;
+}
+
+// Per-agent timeline (the 3 dashboard surfaces). All-time scan, so cached on a
+// longer TTL — cumulative changes slowly — with in-flight dedupe.
+const TIMELINE_TTL_MS = 5 * 60 * 1000;
+let timelineCache: { at: number; data: AgentTimeline[] } | null = null;
+let timelineInflight: Promise<AgentTimeline[]> | null = null;
+async function getAgentTimelines(): Promise<AgentTimeline[]> {
+  if (timelineCache && Date.now() - timelineCache.at < TIMELINE_TTL_MS) return timelineCache.data;
+  if (timelineInflight) return timelineInflight;
+  const p = (async () => {
+    const db = new Database(DB_PATH, { readonly: true });
+    let rows: { role: string; pid: number; transcript_path: string | null }[];
+    try {
+      try {
+        rows = db.prepare(`SELECT role, pid, transcript_path FROM agents`).all() as any;
+      } catch {
+        rows = (db.prepare(`SELECT role, pid FROM agents`).all() as any).map((r: any) => ({ ...r, transcript_path: null }));
+      }
+    } finally {
+      db.close();
+    }
+    const live = rows
+      .filter((r) => isProcessAlive(r.pid))
+      .map((r) => ({ role: r.role, pid: r.pid, transcriptPath: r.transcript_path }));
+    return readAgentTimelines(live);
+  })()
+    .then((data) => {
+      timelineCache = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      timelineInflight = null;
+    });
+  timelineInflight = p;
   return p;
 }
 
@@ -604,6 +640,16 @@ const HTML = String.raw`<!doctype html>
       <div id="usage-projects"></div>
       <p class="nudge-hint">
         Reads each live agent's local Claude Code transcript and totals real token usage per project and per model. Counts are exact (input / output / cache), deduped across forked sessions. The dollar figure is <em>API-equivalent value at list price</em> — on a Max plan you pay a flat fee, so it shows how much consumption the subscription is buying, not a bill. Shows consumption, not your plan's weekly quota ceiling (that's server-side and not exposed locally). <strong>Compact opportunity</strong> = an upper-bound estimate of the cache-read tokens that compacting over-threshold sessions could avoid re-reading — the fixable slice the context-hygiene watcher targets (the real soak measures the actual delta). Read-only — never writes transcripts or touches terminals.
+      </p>
+    </div>
+  </section>
+
+  <section class="panel full">
+    <h2>Per-Agent — Lifetime · Live Context · Compactions</h2>
+    <div class="body">
+      <div id="timeline-body"><p class="nudge-hint">loading…</p></div>
+      <p class="nudge-hint">
+        Three distinct numbers per agent: <strong>Cumulative lifetime</strong> = all tokens that agent has ever consumed, summed across every session — monotonic, never resets (a /compact or /clear does not un-spend history). <strong>Current context</strong> = the live window re-read each turn; this is what a compaction RESETS (e.g. 611K → 13K). <strong>Compactions</strong> mark each reset on the timeline. The before/after is the current-context drop at a compaction marker, against the continuous cumulative line. Read-only.
       </p>
     </div>
   </section>
@@ -1076,6 +1122,37 @@ loadUsage();
 // cadence so we mostly serve the cache and never overlap a scan.
 setInterval(loadUsage, 120000);
 
+// --- Per-agent timeline: cumulative-lifetime · current-context · compactions ---
+function renderTimeline(ts) {
+  if (!ts || !ts.length) { $("timeline-body").innerHTML = '<p class="nudge-hint">No agent timelines yet.</p>'; return; }
+  const rows = ts.map(t => {
+    const ev = t.compactEvents || [];
+    const last = ev.length ? ev[ev.length - 1] : null;
+    const lastStr = last
+      ? escapeHtml(last.trigger) + ' ' + fmtTokens(last.preTokens) + '→' + fmtTokens(last.postTokens) + ' <span class="donut-pct">@' + (last.ts || '').slice(11, 16) + '</span>'
+      : '—';
+    return '<tr>' +
+      '<td>' + escapeHtml(t.role) + '</td>' +
+      '<td class="num">' + fmtTokens(t.cumulativeTokens) + '<div class="usage-roles">' + fmtUsd(t.cumulativeEstUsd) + ' lifetime</div></td>' +
+      '<td class="num">' + fmtTokens(t.currentContextTokens) + '<div class="usage-roles">$' + t.currentContextPerTurnUsd.toFixed(2) + '/turn</div></td>' +
+      '<td class="num">' + ev.length + '</td>' +
+      '<td>' + lastStr + '</td>' +
+    '</tr>';
+  }).join('');
+  $("timeline-body").innerHTML =
+    '<table class="usage-proj"><thead><tr><th>Agent</th><th style="text-align:right">Cumulative (lifetime)</th><th style="text-align:right">Current context (live)</th><th style="text-align:right">Compacts</th><th>Last compaction</th></tr></thead><tbody>' +
+    rows + '</tbody></table>';
+}
+async function loadTimeline() {
+  try {
+    renderTimeline(await api("/api/agent-timeline", "GET"));
+  } catch (e) {
+    if (!e.disconnected) $("timeline-body").innerHTML = '<p class="nudge-hint">timeline unavailable: ' + (e.message || '') + '</p>';
+  }
+}
+loadTimeline();
+setInterval(loadTimeline, 120000);
+
 // --- Project expand (+) → per-session / per-agent breakdown ---
 $("usage-projects").addEventListener("click", (e) => {
   const btn = e.target.closest(".proj-expand");
@@ -1231,6 +1308,12 @@ export function startUIServer(port = 7878): http.Server {
         const days = Number.isFinite(raw) ? Math.max(1, Math.min(30, raw)) : 7;
         getUsage(days)
           .then((u) => send(200, u))
+          .catch((e: any) => send(500, { error: e?.message ?? String(e) }));
+        return;
+      }
+      if (req.method === "GET" && p === "/api/agent-timeline") {
+        getAgentTimelines()
+          .then((t) => send(200, t))
           .catch((e: any) => send(500, { error: e?.message ?? String(e) }));
         return;
       }

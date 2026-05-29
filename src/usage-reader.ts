@@ -310,6 +310,137 @@ async function scanTranscript(
   }
 }
 
+// ── Per-agent timeline (the 3 dashboard surfaces, locked spec lines 175-194) ──
+// #1 cumulative-lifetime (all-time, monotonic — a sliding window would NOT be
+// monotonic, so this is all-time per-agent), #2 current-context-size (the live
+// window, resets on compact), #3 compact-event markers. Attributed per-AGENT
+// (register-role), summed across ALL the agent's sessions — never per-session
+// (a /clear starts a fresh transcript that a per-session sum would zero out).
+export interface CompactMarker {
+  ts: string;
+  trigger: string;
+  preTokens: number;
+  postTokens: number;
+}
+export interface AgentTimeline {
+  role: string;
+  cumulativeTokens: number; // #1 all-time, all sessions
+  cumulativeEstUsd: number;
+  currentContextTokens: number; // #2 latest turn of the most-recent session
+  currentContextPerTurnUsd: number;
+  compactEvents: CompactMarker[]; // #3 timeline markers (most recent last)
+  sessions: number;
+  lastActivity: string | null;
+}
+
+interface FileTimeline {
+  registerRole: string | null;
+  tokens: number;
+  estUsd: number;
+  compacts: CompactMarker[];
+  latestCtxTokens: number;
+  latestModel: string;
+  latestTs: number;
+}
+
+async function scanFileForTimeline(file: string, seen: Set<string>): Promise<FileTimeline> {
+  const out: FileTimeline = { registerRole: null, tokens: 0, estUsd: 0, compacts: [], latestCtxTokens: 0, latestModel: "", latestTs: 0 };
+  const bucket = emptyBucket();
+  const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: "utf-8" }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    // compact boundary marker (#3)
+    if (line.indexOf("compact_boundary") !== -1) {
+      try {
+        const o = JSON.parse(line);
+        if (o?.type === "system" && o?.subtype === "compact_boundary") {
+          const cm = o.compactMetadata || {};
+          out.compacts.push({ ts: o.timestamp || "", trigger: cm.trigger ?? "?", preTokens: cm.preTokens ?? 0, postTokens: cm.postTokens ?? 0 });
+          // A compact is the most-recent EVENT when the agent hasn't taken a
+          // turn since — current-context is then the post-compact size (e.g.
+          // 13K), not the stale pre-compact turn. Latest event wins.
+          const cts = Date.parse(o.timestamp || "") || 0;
+          if (cts >= out.latestTs && cm.postTokens != null) { out.latestTs = cts; out.latestCtxTokens = cm.postTokens; }
+          continue;
+        }
+      } catch { /* fall through */ }
+    }
+    // register-role capture (agent identity)
+    if (out.registerRole === null && line.indexOf("register") !== -1) {
+      try {
+        const c = JSON.parse(line)?.message?.content;
+        if (Array.isArray(c)) for (const b of c) if (b && b.type === "tool_use" && typeof b.name === "string" && b.name.includes("register") && b.input && typeof b.input.role === "string" && b.input.role) { out.registerRole = b.input.role; break; }
+      } catch { /* ignore */ }
+    }
+    if (line.indexOf('"usage"') === -1) continue;
+    let o: any;
+    try { o = JSON.parse(line); } catch { continue; }
+    const msg = o?.message;
+    const u = msg?.usage;
+    if (!u || !msg?.model || msg.model === "<synthetic>") continue;
+    if (msg.id && o.requestId) { const k = msg.id + "::" + o.requestId; if (seen.has(k)) continue; seen.add(k); }
+    addUsage(bucket, msg.model, u);
+    const ts = Date.parse(o.timestamp || "") || 0;
+    // current-context = the chronologically-latest turn's input-side tokens
+    const ctx = (Number(u.input_tokens) || 0) + (Number(u.cache_read_input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0);
+    if (ts >= out.latestTs) { out.latestTs = ts; out.latestCtxTokens = ctx; out.latestModel = msg.model; }
+  }
+  out.tokens = bucket.totalTokens;
+  out.estUsd = bucket.estCostUsd;
+  return out;
+}
+
+export async function readAgentTimelines(agents: AgentRef[]): Promise<AgentTimeline[]> {
+  // Group by project; remember each project's roles + transcript_path→role map.
+  const byProject = new Map<string, { dir: string; roles: string[]; pathRole: Map<string, string> }>();
+  for (const a of agents) {
+    const cwd = cwdForPid(a.pid);
+    if (!cwd) continue;
+    const id = projectIdFromCwd(cwd);
+    const dir = path.join(PROJECTS_DIR, id);
+    if (!fs.existsSync(dir)) continue;
+    const e = byProject.get(id) || { dir, roles: [], pathRole: new Map<string, string>() };
+    e.roles.push(a.role);
+    if (a.transcriptPath) e.pathRole.set(a.transcriptPath, a.role);
+    byProject.set(id, e);
+  }
+
+  const perRole = new Map<string, AgentTimeline>();
+  const get = (role: string): AgentTimeline => {
+    let t = perRole.get(role);
+    if (!t) { t = { role, cumulativeTokens: 0, cumulativeEstUsd: 0, currentContextTokens: 0, currentContextPerTurnUsd: 0, compactEvents: [], sessions: 0, lastActivity: null }; perRole.set(role, t); }
+    return t;
+  };
+  const seen = new Set<string>();
+  const latestTsByRole = new Map<string, number>();
+
+  for (const { dir, roles, pathRole } of byProject.values()) {
+    let files: string[] = [];
+    try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl")).map((f) => path.join(dir, f)); } catch { continue; }
+    for (const file of files) {
+      const ft = await scanFileForTimeline(file, seen);
+      if (ft.tokens === 0 && ft.compacts.length === 0) continue;
+      // attribute: transcript_path map → role; else register-role; else single-agent project's role; else skip
+      const role = pathRole.get(file) || ft.registerRole || (roles.length === 1 ? roles[0] : null);
+      if (!role) continue;
+      const t = get(role);
+      t.cumulativeTokens += ft.tokens;
+      t.cumulativeEstUsd += ft.estUsd;
+      t.sessions += 1;
+      for (const c of ft.compacts) t.compactEvents.push(c);
+      // current-context = latest turn across the role's most-recent session
+      if (ft.latestTs > (latestTsByRole.get(role) || 0) && ft.latestCtxTokens > 0) {
+        latestTsByRole.set(role, ft.latestTs);
+        t.currentContextTokens = ft.latestCtxTokens;
+        t.currentContextPerTurnUsd = (ft.latestCtxTokens * priceFor(ft.latestModel).cacheRead) / 1_000_000;
+        t.lastActivity = new Date(ft.latestTs).toISOString();
+      }
+    }
+  }
+
+  for (const t of perRole.values()) t.compactEvents.sort((a, b) => (Date.parse(a.ts) || 0) - (Date.parse(b.ts) || 0));
+  return [...perRole.values()].filter((t) => agents.some((a) => a.role === t.role)).sort((a, b) => b.cumulativeTokens - a.cumulativeTokens);
+}
+
 export async function readFleetUsage(
   agents: AgentRef[],
   windowDays: number = 7,
