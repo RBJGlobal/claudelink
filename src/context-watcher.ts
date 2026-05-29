@@ -66,7 +66,14 @@ interface WatchedAgent {
   pid: number;
   session_id: string | null;
   transcript_path: string | null;
+  checkpoint_ts: number | null;
+  checkpoint_safe_to_clear: number;
+  checkpoint_handoff_path: string | null;
 }
+
+// Safety-gate freshness for the OBSERVE correlation log. A coarse time window;
+// the armed phase uses the precise "within K turns of the signal" test.
+const CHECKPOINT_FRESH_MS = 10 * 60 * 1000;
 
 // Resolve an agent's session transcript. EXACT path (v3): if the hook captured
 // this agent's transcript_path, use it directly — unambiguous even in a shared
@@ -309,7 +316,11 @@ export function startContextWatcher(): ContextWatcherHandle {
 
   const liveAgents = (): WatchedAgent[] => {
     const rows = openDb()
-      .prepare(`SELECT role, pid, session_id, transcript_path FROM agents`)
+      .prepare(
+        `SELECT role, pid, session_id, transcript_path,
+                checkpoint_ts, checkpoint_safe_to_clear, checkpoint_handoff_path
+           FROM agents`
+      )
       .all() as WatchedAgent[];
     return rows.filter((r) => isProcessAlive(r.pid));
   };
@@ -365,11 +376,22 @@ export function startContextWatcher(): ContextWatcherHandle {
         const netSavedUsd = (netSavedTokens * cacheReadPrice) / 1_000_000;
         const netPositive = netSavedTokens > 0;
 
+        // SAFETY gate (observe correlation): is there a fresh agent-consented
+        // checkpoint signal? Economic-armed means little if the agent hasn't
+        // marked a safe boundary. both-gates-green = act-worthy in the armed
+        // phase; logged here so the cadence/alignment is visible pre-deploy.
+        const economicGreen = activelyProgressing && netPositive;
+        const safetyFresh = a.checkpoint_ts != null && now - a.checkpoint_ts < CHECKPOINT_FRESH_MS;
+        const ckMin = a.checkpoint_ts != null ? ((now - a.checkpoint_ts) / 60000).toFixed(1) : "none";
+        const bothGreen = economicGreen && safetyFresh;
+
         const econStr =
           `context=${econ.contextTokens} model=${econ.model.replace("claude-", "")} ` +
           `per_turn_usd=${perTurnCostUsd.toFixed(2)} turns_per_hr=${econ.turnsPerHour.toFixed(1)} ` +
           `horizon=${horizonTurns.toFixed(1)} net_saved_usd=${netSavedUsd.toFixed(2)} ` +
-          `progressing=${activelyProgressing} ambiguous=${session.ambiguous}`;
+          `progressing=${activelyProgressing} ambiguous=${session.ambiguous} ` +
+          `signal_age_min=${ckMin} safe_to_clear=${a.checkpoint_safe_to_clear} ` +
+          `safety_gate=${safetyFresh} economic_gate=${economicGreen} both_gates_green=${bothGreen}`;
 
         if (!(activelyProgressing && netPositive)) {
           // Armed by cost, but the decision says don't act (idle, or savings
