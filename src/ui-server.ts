@@ -649,7 +649,12 @@ const HTML = String.raw`<!doctype html>
     <div class="body">
       <div id="timeline-body"><p class="nudge-hint">loading…</p></div>
       <p class="nudge-hint">
-        Three distinct numbers per agent: <strong>Cumulative lifetime</strong> = all tokens that agent has ever consumed, summed across every session — monotonic, never resets (a /compact or /clear does not un-spend history). <strong>Current context</strong> = the live window re-read each turn; this is what a compaction RESETS (e.g. 611K → 13K). <strong>Compactions</strong> mark each reset on the timeline. The before/after is the current-context drop at a compaction marker, against the continuous cumulative line. Read-only.
+        <strong>How to read each column:</strong><br>
+        • <strong>Cumulative (lifetime)</strong> — every token this agent has ever consumed (input + output + cache), summed across <em>all</em> its sessions/transcripts. Monotonic — it never drops: a compaction resets the live context but doesn't un-spend past tokens. The $ is API-equivalent value at list price (Max plan = flat fee).<br>
+        • <strong>Current context (live)</strong> — the size of the window it re-reads <em>this turn</em>, from its latest activity. A compaction RESETS this (e.g. 611K → 13K), then it re-climbs as the agent works — the sawtooth. The $/turn is the cache-read cost at that size.<br>
+        • <strong>Compacts</strong> — total number of times this agent's context has been reset over its lifetime, counting BOTH Claude Code's automatic auto-compacts (fire near the context limit) AND manual <span class="mono">/compact</span> or <span class="mono">/clear</span>. The split (N auto · M manual) is shown beneath the total. Each one is a <span class="mono">compact_boundary</span> marker in the transcript.<br>
+        • <strong>Last compaction</strong> — the most recent reset: its trigger (auto/manual), the before→after token size, and the time.<br>
+        The before/after is the current-context drop at a compaction, against the continuous cumulative line. Read-only — never writes transcripts or touches terminals.
       </p>
     </div>
   </section>
@@ -1127,15 +1132,20 @@ function renderTimeline(ts) {
   if (!ts || !ts.length) { $("timeline-body").innerHTML = '<p class="nudge-hint">No agent timelines yet.</p>'; return; }
   const rows = ts.map(t => {
     const ev = t.compactEvents || [];
+    const autoN = ev.filter(e => e.trigger === 'auto').length;
+    const manN = ev.filter(e => e.trigger === 'manual').length;
     const last = ev.length ? ev[ev.length - 1] : null;
     const lastStr = last
       ? escapeHtml(last.trigger) + ' ' + fmtTokens(last.preTokens) + '→' + fmtTokens(last.postTokens) + ' <span class="donut-pct">@' + (last.ts || '').slice(11, 16) + '</span>'
       : '—';
+    const compactsCell = ev.length
+      ? ev.length + '<div class="usage-roles">' + autoN + ' auto · ' + manN + ' manual</div>'
+      : '0';
     return '<tr>' +
       '<td>' + escapeHtml(t.role) + '</td>' +
       '<td class="num">' + fmtTokens(t.cumulativeTokens) + '<div class="usage-roles">' + fmtUsd(t.cumulativeEstUsd) + ' lifetime</div></td>' +
       '<td class="num">' + fmtTokens(t.currentContextTokens) + '<div class="usage-roles">$' + t.currentContextPerTurnUsd.toFixed(2) + '/turn</div></td>' +
-      '<td class="num">' + ev.length + '</td>' +
+      '<td class="num">' + compactsCell + '</td>' +
       '<td>' + lastStr + '</td>' +
     '</tr>';
   }).join('');
