@@ -90,6 +90,15 @@ export interface FleetUsage {
     perDay: PerDayPoint[];
   };
   projects: ProjectUsage[];
+  // Compact-savings opportunity, computed in the SAME transcript pass as the
+  // meter (no second full scan). Upper-bound — real delta is measured in soak.
+  compactOpportunity: {
+    thresholdTokens: number;
+    compactBaselineTokens: number;
+    flaggedTurns: number;
+    excessTokensUpperBound: number;
+    estUsdUpperBound: number;
+  };
 }
 
 // Minimal shape of a registered agent the reader needs. Caller passes live
@@ -176,12 +185,20 @@ function localDate(ts: number): string {
 // Scan one transcript file, accumulating usage into the project buckets and the
 // fleet per-day map. Streams line-by-line so a multi-hundred-MB transcript
 // never lands in memory at once. Only lines within [windowStart, now] count.
+interface OppAccumulator {
+  thresholdTokens: number;
+  baselineTokens: number;
+  flaggedTurns: number;
+  excessTokens: number;
+}
+
 async function scanTranscript(
   file: string,
   windowStartMs: number,
   proj: ProjectUsage,
   perDay: Map<string, { totalTokens: number; estCostUsd: number }>,
-  seen: Set<string>
+  seen: Set<string>,
+  opp: OppAccumulator
 ): Promise<void> {
   const rl = readline.createInterface({
     input: fs.createReadStream(file, { encoding: "utf-8" }),
@@ -217,6 +234,18 @@ async function scanTranscript(
     const ts = Date.parse(o.timestamp || "");
     if (!Number.isFinite(ts) || ts < windowStartMs) continue;
 
+    // Compact-opportunity, same pass: a turn's input-side tokens = context
+    // occupancy; count the excess over the post-compact baseline for turns
+    // above threshold (upper-bound savings if compacted at threshold).
+    const ctxTokens =
+      (Number(u.input_tokens) || 0) +
+      (Number(u.cache_read_input_tokens) || 0) +
+      (Number(u.cache_creation_input_tokens) || 0);
+    if (ctxTokens > opp.thresholdTokens) {
+      opp.flaggedTurns++;
+      opp.excessTokens += Math.max(0, ctxTokens - opp.baselineTokens);
+    }
+
     addUsage(proj.totals, model, u);
     if (!proj.perModel[model]) proj.perModel[model] = emptyBucket();
     addUsage(proj.perModel[model], model, u);
@@ -240,10 +269,18 @@ async function scanTranscript(
 
 export async function readFleetUsage(
   agents: AgentRef[],
-  windowDays: number = 7
+  windowDays: number = 7,
+  thresholdTokens: number = 200000,
+  compactBaselineTokens: number = 60000
 ): Promise<FleetUsage> {
   const now = Date.now();
   const windowStartMs = now - windowDays * 24 * 60 * 60 * 1000;
+  const opp: OppAccumulator = {
+    thresholdTokens,
+    baselineTokens: compactBaselineTokens,
+    flaggedTurns: 0,
+    excessTokens: 0,
+  };
 
   // Map live agents -> project dirs, grouping agents that share a cwd.
   const byProject = new Map<string, { cwd: string; projectId: string; roles: string[] }>();
@@ -305,7 +342,7 @@ export async function readFleetUsage(
         continue;
       }
       proj.sessions++;
-      await scanTranscript(file, windowStartMs, proj, perDay, seen);
+      await scanTranscript(file, windowStartMs, proj, perDay, seen, opp);
     }
 
     projects.push(proj);
@@ -351,5 +388,12 @@ export async function readFleetUsage(
     skippedNoCwd,
     fleet: { totals: fleetTotals, perModel: fleetPerModel, perDay: perDaySeries },
     projects,
+    compactOpportunity: {
+      thresholdTokens,
+      compactBaselineTokens,
+      flaggedTurns: opp.flaggedTurns,
+      excessTokensUpperBound: opp.excessTokens,
+      estUsdUpperBound: (opp.excessTokens * OPUS_CACHE_READ_PER_MTOK) / 1_000_000,
+    },
   };
 }

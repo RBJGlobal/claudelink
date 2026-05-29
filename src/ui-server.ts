@@ -21,8 +21,6 @@ import { readFleetUsage, FleetUsage } from "./usage-reader.js";
 import {
   startContextWatcher,
   ContextWatcherHandle,
-  projectCompactOpportunity,
-  CompactOpportunity,
 } from "./context-watcher.js";
 import {
   readContextWatcherSettings,
@@ -190,9 +188,17 @@ function getState(): {
 // real token usage from the local transcripts. Privacy guardrail: only LIVE
 // fleet agents are passed, so we never scan the user's unrelated ~/.claude
 // history. Read-only — no DB writes, no terminal contact.
-async function getUsage(
-  windowDays: number
-): Promise<FleetUsage & { compactOpportunity: CompactOpportunity }> {
+// Scanning the fleet's transcripts is expensive (large sessions → multi-second
+// parses). Two safeguards so the dashboard never piles up requests:
+//   1. A short TTL result cache keyed by windowDays — repeat views / the
+//      periodic refresh return instantly within the window.
+//   2. In-flight dedupe — concurrent requests for the same window share ONE
+//      computation instead of each kicking off its own full scan.
+const USAGE_TTL_MS = 5 * 60 * 1000;
+const usageCache = new Map<number, { at: number; data: FleetUsage }>();
+const usageInflight = new Map<number, Promise<FleetUsage>>();
+
+async function computeUsage(windowDays: number): Promise<FleetUsage> {
   const db = new Database(DB_PATH, { readonly: true });
   let rows: { role: string; pid: number }[];
   try {
@@ -204,15 +210,26 @@ async function getUsage(
     db.close();
   }
   const live = rows.filter((r) => isProcessAlive(r.pid));
-  // Run the meter and the context-hygiene opportunity projection together so
-  // the panel renders the burn AND the fixable portion in one round-trip. The
-  // projection's threshold/baseline track the watcher's settings.
+  // Single transcript pass computes BOTH the meter and the compact-opportunity
+  // (the projection's threshold/baseline track the watcher's settings) — no
+  // second full scan.
   const cw = readContextWatcherSettings();
-  const [usage, compactOpportunity] = await Promise.all([
-    readFleetUsage(live, windowDays),
-    projectCompactOpportunity(live, windowDays, cw.thresholdTokens, cw.compactBaselineTokens),
-  ]);
-  return { ...usage, compactOpportunity };
+  return readFleetUsage(live, windowDays, cw.thresholdTokens, cw.compactBaselineTokens);
+}
+
+async function getUsage(windowDays: number): Promise<FleetUsage> {
+  const cached = usageCache.get(windowDays);
+  if (cached && Date.now() - cached.at < USAGE_TTL_MS) return cached.data;
+  const existing = usageInflight.get(windowDays);
+  if (existing) return existing;
+  const p = computeUsage(windowDays)
+    .then((data) => {
+      usageCache.set(windowDays, { at: Date.now(), data });
+      return data;
+    })
+    .finally(() => usageInflight.delete(windowDays));
+  usageInflight.set(windowDays, p);
+  return p;
 }
 
 function healOrphans(): { deleted_messages: number; pruned_agents: number } {
@@ -972,26 +989,39 @@ function renderUsage(u) {
     '<table class="usage-proj"><thead><tr><th>Project / agent</th><th style="text-align:right">Tokens</th><th style="text-align:right">API-equiv. $</th><th>By model</th></tr></thead><tbody>' +
     rows + '</tbody></table>' + note;
 }
+let usageLoading = false;
+let usageHasData = false;
 async function loadUsage() {
+  // Re-entrancy guard: a fleet-transcript scan can take many seconds. Never
+  // start a second fetch while one is in flight — overlapping fetches pile up,
+  // slam the server, and leave the status stuck on "reading…".
+  if (usageLoading) return;
+  usageLoading = true;
   const days = parseInt($("usage-days").value, 10) || 7;
   const status = $("usage-status");
-  status.textContent = "reading transcripts…";
+  // Only show the prominent "reading…" on the FIRST load (no data yet). On
+  // background refreshes the existing numbers stay visible — a subtle hint only.
+  status.textContent = usageHasData ? "refreshing…" : "first scan of fleet transcripts — can take a moment…";
   status.classList.add("show");
   try {
     const u = await api("/api/usage?days=" + days, "GET");
     renderUsage(u);
+    usageHasData = true;
     status.textContent = "updated";
     setTimeout(() => status.classList.remove("show"), 1200);
   } catch (e) {
     status.textContent = "";
     status.classList.remove("show");
     if (!e.disconnected) toast("Failed to load usage: " + e.message, "error");
+  } finally {
+    usageLoading = false;
   }
 }
 $("usage-days").addEventListener("change", loadUsage);
 loadUsage();
-// Transcript parsing is heavier than /api/state — refresh on a slow cadence.
-setInterval(loadUsage, 30000);
+// Transcript parsing is heavy + server-cached (5 min TTL); refresh on a slow
+// cadence so we mostly serve the cache and never overlap a scan.
+setInterval(loadUsage, 120000);
 
 // --- Tabs ---
 document.querySelectorAll(".tab").forEach((btn) => {
