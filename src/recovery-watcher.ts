@@ -85,6 +85,23 @@ const ERROR_PATTERNS: RegExp[] = [
   // Without the line-start anchor, agents writing about ClaudeLink in
   // their own work (e.g. the build-log writer) hit this as a false positive.
   /(?:^|\n)[\s│⎿]*Error:?\b[\s\S]{0,80}?\b(rate[ _-]?limited|rate_limit_error|overloaded_error|request was throttled)\b/i,
+
+  // Claude Code safety-classifier auto-mode failure. Shape:
+  //   "<model> is temporarily unavailable, so auto mode cannot determine
+  //    the safety of <ToolName> right now. Wait briefly and then try..."
+  // When the classifier model is down, auto-permission for a tool call
+  // (WebFetch / WebSearch / Bash / Read of a sensitive path / etc.) can't
+  // be granted, and the agent halts mid-turn waiting on an approval that
+  // will never arrive. Model name and tool name both vary; the
+  // "is temporarily unavailable, so auto mode cannot determine the safety"
+  // clause is invariant across variants we've observed.
+  //
+  // No "Error:" / "API Error:" prefix needed here — Claude Code emits this
+  // as a system advisory, not an API error, so the prefix design rule from
+  // the patterns above doesn't apply. The phrase itself is distinctive
+  // enough (no one writes it conversationally) and the MAX_DISTANCE_FROM_END
+  // guard still keeps any prose mention from firing.
+  /\bis\s+temporarily\s+unavailable,?\s+so\s+auto\s+mode\s+cannot\s+determine\s+the\s+safety\b/i,
 ];
 
 // Capture only the last N characters of scrollback. Errors that paused
