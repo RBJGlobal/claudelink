@@ -329,8 +329,15 @@ const HTML = String.raw`<!doctype html>
   header button:hover { background: var(--border); }
   header button.danger { color: var(--red); border-color: rgba(255,107,107,0.3); }
   header button.danger:hover { background: rgba(255,107,107,0.1); }
-  main { padding: 20px; display: grid; gap: 16px; grid-template-columns: 1fr 1fr; max-width: 1400px; margin: 0 auto; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .tabs { display: flex; gap: 2px; padding: 0 20px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .tab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted); padding: 12px 18px; font-size: 14px; font-weight: 500; cursor: pointer; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
   .panel h2 .count { background: var(--panel-2); color: var(--text); padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
@@ -425,7 +432,25 @@ const HTML = String.raw`<!doctype html>
   <button id="btn-retry-now">Retry now</button>
 </div>
 
+<nav class="tabs">
+  <button class="tab active" data-tab="overview">Overview</button>
+  <button class="tab" data-tab="meter">Fleet Token Meter</button>
+</nav>
+
 <main>
+ <div class="tab-content active" id="tab-overview">
+  <div class="grid">
+  <section class="panel full">
+    <h2>Health</h2>
+    <div class="body">
+      <div class="health-grid" id="health-grid"></div>
+      <div class="actions-bar">
+        <button id="btn-heal" class="primary">Heal orphans</button>
+        <span id="heal-hint" style="color: var(--muted); font-size: 12px; align-self: center;"></span>
+      </div>
+    </div>
+  </section>
+
   <section class="panel">
     <h2>Running servers <span class="count" id="srv-count">0</span></h2>
     <div class="body">
@@ -443,17 +468,6 @@ const HTML = String.raw`<!doctype html>
         <thead><tr><th>Role</th><th>PID</th><th>Status</th><th>Auto-reply</th><th>Msgs</th><th>Last seen</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
-    </div>
-  </section>
-
-  <section class="panel full">
-    <h2>Health</h2>
-    <div class="body">
-      <div class="health-grid" id="health-grid"></div>
-      <div class="actions-bar">
-        <button id="btn-heal" class="primary">Heal orphans</button>
-        <span id="heal-hint" style="color: var(--muted); font-size: 12px; align-self: center;"></span>
-      </div>
     </div>
   </section>
 
@@ -513,6 +527,15 @@ const HTML = String.raw`<!doctype html>
   </section>
 
   <section class="panel full">
+    <h2>Recent messages <span class="count" id="msg-count">0</span></h2>
+    <div class="body" id="msg-body"></div>
+  </section>
+  </div>
+ </div>
+
+ <div class="tab-content" id="tab-meter">
+  <div class="grid">
+  <section class="panel full">
     <h2>Fleet Token Meter <span class="count" id="usage-window">7d</span></h2>
     <div class="body">
       <div class="nudge-controls">
@@ -535,11 +558,8 @@ const HTML = String.raw`<!doctype html>
       </p>
     </div>
   </section>
-
-  <section class="panel full">
-    <h2>Recent messages <span class="count" id="msg-count">0</span></h2>
-    <div class="body" id="msg-body"></div>
-  </section>
+  </div>
+ </div>
 </main>
 
 <footer>ClaudeLink Command Center · auto-refresh every 2s · <span class="mono">127.0.0.1</span></footer>
@@ -937,6 +957,17 @@ $("usage-days").addEventListener("change", loadUsage);
 loadUsage();
 // Transcript parsing is heavier than /api/state — refresh on a slow cadence.
 setInterval(loadUsage, 30000);
+
+// --- Tabs ---
+document.querySelectorAll(".tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
+    btn.classList.add("active");
+    const target = document.getElementById("tab-" + btn.getAttribute("data-tab"));
+    if (target) target.classList.add("active");
+  });
+});
 </script>
 </body>
 </html>`;
