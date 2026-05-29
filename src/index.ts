@@ -102,9 +102,17 @@ function detectPaneId(): string | null {
   );
 }
 
+// Self-conveying behavioral protocol surfaced to every connecting agent via the
+// MCP `initialize` instructions field (Claude Code injects this into the model's
+// context automatically — no per-terminal CLAUDE.md edit). Kept well under the
+// 2KB Claude Code truncates server instructions at, critical detail first.
+// Single global source: every agent reads this identical text on connect.
+const CHECKPOINT_INSTRUCTIONS =
+  "ClaudeLink — context & checkpoint hygiene: Your context grows every turn and is re-read at a cost you cannot see; ClaudeLink measures it for you. At each SAFE CHECKPOINT — you just finished a discrete unit of work, wrote your progress/decisions to your handoff or memory file, and have nothing in flight — call the signal_checkpoint tool ({safe_to_clear, handoff_path, note}). You decide only WHEN it is safe; ClaudeLink decides WHETHER compacting is worth it, so a compact never lands mid-work. The signal is fresh each call (not a one-time setting) — re-emit at every checkpoint. Set safe_to_clear=true only if everything needed to resume is in your handoff file and nothing live still matters. Currently observe-only — ClaudeLink records the signal and acts on nothing.";
+
 const server = new Server(
   { name: "ClaudeLink", version: "1.0.0" },
-  { capabilities: { tools: {} } }
+  { capabilities: { tools: {} }, instructions: CHECKPOINT_INSTRUCTIONS }
 );
 
 function requireRegistration(): string {
@@ -242,7 +250,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "signal_checkpoint",
       description:
-        "Signal that you are at a SAFE checkpoint for context management — you just finished a discrete unit of work, your handoff/memory is written, and nothing is in flight. You do NOT need to know your own token count; ClaudeLink measures context cost separately. This is the SAFETY gate: ClaudeLink only ever considers compacting your context at a moment you yourself marked safe. The signal is instantaneous (a fresh checkpoint each time you call it), not a standing flag — re-emit it at each real checkpoint. Currently observe-only: ClaudeLink records the signal; nothing acts on it.",
+        "Call this at a SAFE CHECKPOINT: you have (1) just finished a discrete unit of work, (2) written progress/decisions to your handoff or memory file, and (3) nothing in flight (no half-done edit, no pending tool result, no open multi-step op). You do NOT need to know your own token count — ClaudeLink measures context cost and decides whether to compact; you only mark WHEN it is safe, so a compact never lands mid-work. Instantaneous (a fresh checkpoint each call), not a standing flag — re-emit at every safe checkpoint. safe_to_clear=true only if everything needed to resume is in your handoff file and nothing in live context still matters (permits a full clear, which also recovers a corrupted/erroring session); false = a summarizing compact is safer. Currently observe-only: ClaudeLink records the signal; nothing acts on it.",
       inputSchema: {
         type: "object" as const,
         properties: {
