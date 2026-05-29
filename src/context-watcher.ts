@@ -492,19 +492,21 @@ export function startContextWatcher(): ContextWatcherHandle {
             pane_id: a.pane_id,
             pid: a.pid,
           };
+          // LATCH FIRST: persist enabled=false BEFORE injecting. If the process
+          // crashes between the inject and the latch, it must NOT re-fire on
+          // restart — so the latch lands first. Injection failing is recoverable
+          // (re-enable manually); a double-inject is not (you can't un-inject).
+          if (s.oneShot) {
+            writeContextWatcherSettings({ enabled: false });
+            logLine(`ONE-SHOT LATCH set (enabled=false) before firing ${a.role}`);
+          }
           const result = injectKeystroke(candidate, s.message);
           summary.injected++;
           st.lastNudgedAt = now;
           st.nudgeCount++;
           state.set(a.role, st);
           logLine(`ARMED-FIRE role=${a.role} action=${JSON.stringify(s.message)} result=${result} ${econStr} ${gates}`);
-          if (s.oneShot) {
-            // One-shot latch: disable the watcher after the first fire so this
-            // can't become a standing fleet loop. Re-enable to fire again.
-            writeContextWatcherSettings({ enabled: false });
-            logLine(`ONE-SHOT LATCH: fired on ${a.role}; watcher disabled (enabled=false).`);
-            break;
-          }
+          if (s.oneShot) break;
         }
       }
       return summary;
