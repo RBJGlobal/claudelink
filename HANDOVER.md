@@ -2,11 +2,72 @@
 
 > **Purpose:** First thing to read when resuming work on the claudelink package itself. `CLAUDE.md` is the always-on directive layer; this file is the session-resume pointer.
 >
-> **Last session:** 2026-05-25
+> **Last session:** 2026-05-29
 
 ---
 
-## Current status: v1.4.1 LIVE on npm; v1.4.2 + v1.4.3 STAGED LOCALLY soaking before publish decision
+## Current status: v1.4.3 LIVE on npm; major build wave on `feat/fleet-token-meter` (unpublished, partially un-deployed); first end-to-end armed auto-compact succeeded; C1 fail-closed whitelist built and ready; standing-on rollout awaiting founder direct go + worker-role picks
+
+**Branch:** `feat/fleet-token-meter` (head `ad7ef82`). v1.4.3 (commit `87fbf3e`) shipped to npm; everything else on the branch is local + symlinked into the global `claudelink` (so newly-spawned `claudelink-server` processes pick it up, running daemons don't until restarted).
+
+### Everything built on the branch (chronological, all on `feat/fleet-token-meter`)
+
+| Commit | What | Status |
+|---|---|---|
+| `21e94cb` | Tier-2 context-hygiene watcher (observe-only) + compact-savings projection | live (observe) |
+| `501c55c` | `compact-analyzer.ts` — read-only loss calibration over natural compacts; GET `/api/compact-analysis` | live (read-only) |
+| `d108eeb` | Item 1 — $/turn economic trigger + net-savings fire-decision (gated, observe) | live (observe) |
+| `cc0ba5b` | Item 4 — session-identity capture (hook stdin → DB; schema v3) | live, hook-dependent |
+| `efd8257` | §C state-preservation — Path A/B dry planners + handoff schema + A/B harness | dry only, gated |
+| `2b5635c` | `signal_checkpoint` MCP primitive — agent-consented checkpoint (schema v4) | live (observe), MCP tool needs per-agent session restart to be callable |
+| `490df44` | Two-gate observe correlation logging in context-watcher | live (observe) |
+| `1cd7efd` | Wire `signal_checkpoint` protocol into MCP server `instructions` field (self-conveying habit, <2KB) | live for new sessions |
+| `3a67a83` | Tab the Command Center — Overview + Fleet Token Meter | live (CC restart req'd) |
+| `416544e` | Adaptive trend — donut for single-day, bars for multi-day | live (CC restart req'd) |
+| `fa3dec7` | Fix meter getting stuck on "reading transcripts" — re-entrancy guard + cache + 120s interval | live (CC restart req'd) |
+| `8b5af10` | `+` expand on project rows → per-session breakdown | live (CC restart req'd) |
+| `5e2134c` | Label per-session breakdown by REGISTERED agent name | live (CC restart req'd) |
+| `e0f9c62` | `arm-compact.ts` — one-shot armed `/compact` CLI runner (dry default, `--fire` to inject) | gated, founder-supervised |
+| `7f49493` | Arm inject path in context-watcher — system one-shot `/compact` (gated off) | live, watcher disabled |
+| `7f9e0e7` | Latch BEFORE inject in one-shot path (crash-safe) | live |
+| `8db191f` | Per-agent timeline — cumulative-lifetime + current-context + compact markers (locked spec) | live (CC restart req'd) |
+| `ac054bd` | Per-agent timeline legend + auto/manual compact split | live (CC restart req'd) |
+| `6fca68e` | **C1 — fail-closed role allowlist for armed inject** (the "controlled subset" gate) | built, fail-closed, NOT armed |
+| `ad7ef82` | **Recovery Watcher — match Claude Code safety-classifier auto-mode failures** | built, smoke-tested 5/5 |
+
+### What succeeded end-to-end (2026-05-29 10:46) — full intelligent auto-compact loop, supervised
+Re-enabled the armed watcher one-shot. The SYSTEM (Command Center watcher pid 66912) autonomously evaluated both gates, selected ONLY Global Sites Developer (clawless/clawdemy-dev-03 inject-skipped: no-consent / ambiguous), latched first, injected `/compact` (result=ok). Compaction completed: `compact_boundary` 14→15, trigger=manual, **611,035 → 13,290 tokens (97.8% reduction)**, ~2 min. Isolation held (iLoveMD 11, WhisprDesk 26 untouched). Founder visually confirmed. Watcher auto-latched OFF.
+
+### What the resume agent needs to know right now
+
+1. **C1 whitelist is built but NOT armed.** Default `injectAllowlist: []` arms nobody. The inject branch's FIRST gate is `if (!injectAllowlist.includes(role)) skip`. Verified fail-closed. Live `context-watcher.json` has no allowlist set → defaults to `[]` → arms no one even if `enabled: true`.
+2. **Command Center pid 66912 is on pre-whitelist + pre-classifier-pattern code.** Both `6fca68e` and `ad7ef82` are linked into the global package but the running CC daemon hasn't loaded them. CC restart turns both on simultaneously. Restarting the CC is a separate detached process; it does NOT touch agent sessions (only a few-second gap in nudge/recovery coordination).
+3. **Standing-on rollout is OFF.** Founder Advisor was pinged with the three items it requested (role-string format, fail-closed confirmation, exact enable/kill toggles). Standing-on doesn't start until founder direct go + founder picks 2-3 worker roles (excluding Founder Advisor + clawdemy-lead — coordinator threshold is a follow-up, not built).
+4. **Awaiting:** (a) Founder Advisor reply on the arm sequence; (b) founder human label on Global Sites Developer's post-compact behavior ("did it lose anything?") — first calibration data point + case-study seed.
+
+### Arm sequence (all founder-gated, in order)
+1. Founder picks 2-3 worker roles (exact strings from `get_agents`)
+2. Restart those terminals (new code → they call `signal_checkpoint` → fresh consent)
+3. Restart Command Center (loads whitelist-aware watcher + classifier pattern)
+4. `POST /api/context-watcher {"enabled":true,"mode":"inject","oneShot":false,"injectAllowlist":[...]}`
+
+**KILL (instant):** `POST /api/context-watcher {"enabled":false}` or the CC toggle. Per-terminal abort: Ctrl-C / Esc.
+
+### Known polish / follow-ups (not blocking today)
+- **Retry-on-transient-fail** in armed inject: ETIMEDOUT currently latches the one-shot. Standing-on self-retries via cooldown, but a transient retry inside the same fire would be cleaner.
+- **Per-role coordinator threshold** (different $/turn for Founder Advisor / clawdemy-lead vs workers). On-paper not built; batch 1 is workers-only.
+- **Recovery Watcher false-fires** on agents discussing API-error keywords mid-conversation — tightening pass on prior patterns (the new classifier pattern is structurally distinctive enough not to need it, but the older rate-limit patterns hit false positives 2026-05-29 ~10:38 on claudelink-developer and Founder Advisor).
+- **Item 4 hook deployment.** Schema v3 + capture logic are live; session-id only populates after each agent's Stop hook fires once on the new code — so still hook-enabled-agents-only and ambiguity persists for the 8-clawdemy shared-repo cluster until session-id capture covers them.
+
+### Decision rule for the soak window
+Watch `~/.claudelink/scheduler.log`, `~/.claudelink/recovery-watcher.log`, `~/.claudelink/checkpoint.log`, `~/.claudelink/context-watcher.log`. Any unexpected fire, any `not-in-allowlist` skip that shouldn't have skipped, any false-fire on the new classifier pattern → flag for fix BEFORE the branch goes to npm.
+
+### Branch publish status
+`feat/fleet-token-meter` is NOT merged to main and NOT on npm. v1.4.3 (the last published release) is the public state. The branch will not be published until: (a) standing-on rollout completes a clean supervised soak; (b) per-agent loss data is collected on the first round of armed compacts; (c) founder approves the publish.
+
+---
+
+## Prior status (2026-05-25 session): v1.4.1 LIVE on npm; v1.4.2 + v1.4.3 STAGED LOCALLY soaking before publish decision
 
 **Why we're holding local:** v1.4.0/1/2/3 are all separate fixes, evaluated under real-load conditions on the 14-agent fleet before any goes to the public registry. Founder's local install runs the latest staged code — fleet is protected. Only npmjs.com lags at 1.4.1 in the meantime.
 
