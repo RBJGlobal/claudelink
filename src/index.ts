@@ -107,8 +107,16 @@ function detectPaneId(): string | null {
 // context automatically — no per-terminal CLAUDE.md edit). Kept well under the
 // 2KB Claude Code truncates server instructions at, critical detail first.
 // Single global source: every agent reads this identical text on connect.
-const CHECKPOINT_INSTRUCTIONS =
-  "ClaudeLink — context & checkpoint hygiene: Your context grows every turn and is re-read at a cost you cannot see; ClaudeLink measures it for you. At each SAFE CHECKPOINT — you just finished a discrete unit of work, wrote your progress/decisions to your handoff or memory file, and have nothing in flight — call the signal_checkpoint tool ({safe_to_clear, handoff_path, note}). You decide only WHEN it is safe; ClaudeLink decides WHETHER compacting is worth it, so a compact never lands mid-work. The signal is fresh each call (not a one-time setting) — re-emit at every checkpoint. Set safe_to_clear=true only if everything needed to resume is in your handoff file and nothing live still matters. Currently observe-only — ClaudeLink records the signal and acts on nothing.";
+const CHECKPOINT_INSTRUCTIONS = `ClaudeLink — context checkpoint protocol. Each turn pays to re-read your full context, and an uncontrolled auto-compact can lose hours of work. ClaudeLink watches your context size and can run an autonomous /compact at a moment you've declared safe. Calling signal_checkpoint is how you opt into this protection.
+
+WHEN TO CALL: at every natural rest point — after a discrete piece of work, at end-of-turn with nothing in flight, after summarizing to a handoff or memory file, or any time it's been many turns since your last call. The signal is fresh each call; call often. You decide WHEN it is safe; ClaudeLink decides WHETHER to compact (gates on size, economics, signal age, idle, ambiguity). A compact never lands mid-work — the gate refuses if anything looks in-flight.
+
+PARAMS {safe_to_clear, handoff_path, note}:
+- safe_to_clear=true only if your handoff has everything needed to resume AND nothing live still matters. When false, your call still updates the freshness signal — valuable on its own.
+- handoff_path: file to resume from (optional).
+- note: one-line label, e.g. "finished auth refactor, tests green".
+
+If your role is on the armed allowlist, your call may trigger a real /compact. If not, ClaudeLink records for calibration. Either way, calling is how the system gets safer.`;
 
 const server = new Server(
   { name: "ClaudeLink", version: "1.0.0" },
