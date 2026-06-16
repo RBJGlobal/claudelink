@@ -25,7 +25,34 @@ import os from "os";
 export type CompactPath = "A" | "B";
 export const DEFAULT_PATH: CompactPath = "A"; // conservative-soak default
 
-const HANDOFF_DIR = path.join(os.homedir(), ".claudelink", "handoffs");
+export const HANDOFF_DIR = path.join(os.homedir(), ".claudelink", "handoffs");
+
+// Marker substrings from HANDOFF_TEMPLATE — used by verifyHandoff to detect a
+// "filled in nothing, just kept the stub" handoff. The template itself is
+// ~270 bytes which sails over the >200-byte size gate, so a byte-count check
+// alone is bypassable. Updated together with HANDOFF_TEMPLATE.
+const HANDOFF_PLACEHOLDERS = [
+  "<role>",
+  "<what you are doing right now",
+  "<constraints, choices already made",
+  "<the very next action to take on resume>",
+  "<anything in flight, awaited, or deferred>",
+];
+
+// True iff `p` resolves under ~/.claudelink/handoffs/. Used at the
+// signal_checkpoint ingress to reject agent-supplied paths that would let a
+// confused agent satisfy the handoff gate with any large file on disk
+// (e.g. /etc/passwd, a node_modules tarball). Returns false for any path that
+// can't be resolved.
+export function isHandoffPathSafe(p: string): boolean {
+  try {
+    const resolved = path.resolve(p);
+    const root = path.resolve(HANDOFF_DIR);
+    return resolved === root || resolved.startsWith(root + path.sep);
+  } catch {
+    return false;
+  }
+}
 
 // The structured essence the agent preserves across a compact. The 780K it
 // re-reads every turn is mostly dead weight; this is the few-KB that matters.
@@ -67,10 +94,20 @@ export function postCompactPrompt(p: CompactPath, handoffFile: string): string {
 }
 
 // Verify the agent actually wrote a non-trivial handoff before compacting.
+// Two checks, both required: file must be >200 bytes AND must NOT contain any
+// of the HANDOFF_TEMPLATE placeholders unfilled. A byte-count alone is
+// bypassable because the template itself is ~270 bytes — an agent that wrote
+// the template verbatim with nothing else would satisfy size but have zero
+// real content. The placeholder scan catches that.
 export function verifyHandoff(file: string): { ok: boolean; bytes: number } {
   try {
     const st = fs.statSync(file);
-    return { ok: st.size > 200, bytes: st.size }; // >200 bytes = more than the template stub
+    if (st.size <= 200) return { ok: false, bytes: st.size };
+    const body = fs.readFileSync(file, "utf-8");
+    for (const ph of HANDOFF_PLACEHOLDERS) {
+      if (body.includes(ph)) return { ok: false, bytes: st.size };
+    }
+    return { ok: true, bytes: st.size };
   } catch {
     return { ok: false, bytes: 0 };
   }

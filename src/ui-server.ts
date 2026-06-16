@@ -1292,9 +1292,15 @@ export function startUIServer(port = 7878): http.Server {
           db.close();
         }
         const live = rows.filter((r) => isProcessAlive(r.pid));
-        analyzeCompactEvents(live, days)
-          .then((a) => send(200, a))
-          .catch((e: any) => send(500, { error: e?.message ?? String(e) }));
+        // .then(ok, err) split — not .then(ok).catch(err). If `send(200,...)`
+        // itself throws (e.g. circular JSON, headers already written), the
+        // sibling .catch would also call send → "Cannot set headers after they
+        // are sent." The two-arg .then keeps the success and failure paths
+        // mutually exclusive.
+        analyzeCompactEvents(live, days).then(
+          (a) => send(200, a),
+          (e: any) => send(500, { error: e?.message ?? String(e) })
+        );
         return;
       }
       if (req.method === "POST" && p === "/api/context-watcher") {
@@ -1316,15 +1322,17 @@ export function startUIServer(port = 7878): http.Server {
       if (req.method === "GET" && p === "/api/usage") {
         const raw = parseInt(url.searchParams.get("days") || "7", 10);
         const days = Number.isFinite(raw) ? Math.max(1, Math.min(30, raw)) : 7;
-        getUsage(days)
-          .then((u) => send(200, u))
-          .catch((e: any) => send(500, { error: e?.message ?? String(e) }));
+        getUsage(days).then(
+          (u) => send(200, u),
+          (e: any) => send(500, { error: e?.message ?? String(e) })
+        );
         return;
       }
       if (req.method === "GET" && p === "/api/agent-timeline") {
-        getAgentTimelines()
-          .then((t) => send(200, t))
-          .catch((e: any) => send(500, { error: e?.message ?? String(e) }));
+        getAgentTimelines().then(
+          (t) => send(200, t),
+          (e: any) => send(500, { error: e?.message ?? String(e) })
+        );
         return;
       }
       if (req.method === "GET" && p === "/api/recovery-watcher") {

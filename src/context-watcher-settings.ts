@@ -76,7 +76,21 @@ const DEFAULTS: ContextWatcherSettings = {
 
 function cleanAllowlist(v: any): string[] {
   if (!Array.isArray(v)) return [];
-  return v.filter((x) => typeof x === "string" && x.trim().length > 0);
+  // Trim whitespace + drop empties + dedupe. Without trim, `["dev", "dev "]`
+  // would pass two distinct entries through and the gate's role-includes check
+  // would treat "dev " and "dev" as different roles — a footgun if the
+  // operator pastes a list with a stray space. Dedupe is belt-and-braces.
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of v) {
+    if (typeof x !== "string") continue;
+    const trimmed = x.trim();
+    if (trimmed.length === 0) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
 }
 
 function clampInt(n: number, lo: number, hi: number, dflt: number): number {

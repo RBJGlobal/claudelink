@@ -235,7 +235,15 @@ async function scanTranscript(
           for (const b of content) {
             if (
               b && b.type === "tool_use" &&
-              typeof b.name === "string" && b.name.includes("register") &&
+              typeof b.name === "string" &&
+              // Tighten match: an MCP server with a tool named e.g.
+              // "register_user" would have leaked through includes("register").
+              // The ClaudeLink register tool is namespaced under mcp__claudelink
+              // by Claude Code, so the trailing-name is "register" or
+              // "mcp__claudelink__register" — match the suffix exactly.
+              (b.name === "register" ||
+                b.name.endsWith("__register") ||
+                b.name === "mcp__claudelink__register") &&
               b.input && typeof b.input.role === "string" && b.input.role
             ) {
               fileInfo.registerRole = b.input.role;

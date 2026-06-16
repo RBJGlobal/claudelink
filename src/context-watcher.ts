@@ -91,17 +91,39 @@ interface WatchedAgent {
 // the armed phase uses the precise "within K turns of the signal" test.
 const CHECKPOINT_FRESH_MS = 10 * 60 * 1000;
 
+// Maximum staleness for a v3-captured transcript_path before we treat it as
+// suspect and fall back to the heuristic + ambiguous flag. Sessions can be
+// replaced under the same TTY without the hook re-firing (Claude Code session
+// restart, /resume to a different session, etc.), and the watcher must NOT
+// inject /compact into a transcript that the captured path is now wrong about.
+// 30 min is generous — a legitimately-active session writes to its transcript
+// well within that window; anything older means the agent is idle (no harm in
+// falling back) or the path is stale (correct to fall back).
+const TRANSCRIPT_STALE_MS = 30 * 60 * 1000;
+
 // Resolve an agent's session transcript. EXACT path (v3): if the hook captured
 // this agent's transcript_path, use it directly — unambiguous even in a shared
 // repo dir, and the source of truth for injection targeting. Otherwise fall
 // back to the most-recent transcript in the project dir (flagged ambiguous when
 // the dir has >1 recently-active session, since we can't tell which is whose).
+//
+// RECENCY CHECK: even when v3 path is captured, verify the file's mtime is
+// recent (< TRANSCRIPT_STALE_MS) before trusting it. Otherwise a session that
+// was replaced in the same terminal (no re-register fired the hook) could let
+// the watcher score gates against a dead transcript and inject /compact into a
+// LIVE different session in the same terminal. Stale path → drop to the
+// ambiguous heuristic path.
 function resolveSession(agent: WatchedAgent): SessionRef | null {
   if (agent.transcript_path) {
     try {
-      if (fs.existsSync(agent.transcript_path)) {
+      const st = fs.statSync(agent.transcript_path);
+      const ageMs = Date.now() - st.mtimeMs;
+      if (ageMs < TRANSCRIPT_STALE_MS) {
         return { file: agent.transcript_path, ambiguous: false };
       }
+      // Path exists but is stale — fall through and force the heuristic. If
+      // the heuristic picks the same file we'll still treat it as ambiguous
+      // (the v3 path was the only authority on non-ambiguity).
     } catch {
       /* fall through to heuristic */
     }
@@ -155,34 +177,53 @@ interface TurnEconomics {
 // Reads the economic state of a session's most-recent real turns: current
 // context occupancy + model (for $/turn pricing) + last activity + recent
 // turns/hour (rate-of-burn). Streams the file keeping a small rolling tail.
+//
+// LATEST-TS GUARD: Claude Code's JSONL transcripts contain interleaved branches
+// (resumes/forks) where a later-written line can have an EARLIER timestamp than
+// some line earlier in the file. So "the last line in the file" is not the same
+// as "the latest turn by time." We must only overwrite contextTokens+model when
+// the line's timestamp is >= the latest we've seen — otherwise the economic
+// gate compares against stale data from an older branch.
+//
+// STREAM CLEANUP: try/finally with explicit rl.close() so a transient error
+// mid-stream doesn't leak the file handle.
 async function latestTurnEconomics(file: string): Promise<TurnEconomics | null> {
   let contextTokens: number | null = null;
   let model = "";
+  let latestTs = -Infinity;
   const recentTs: number[] = []; // timestamps of recent real turns (rolling)
   const RECENT = 20;
-  const rl = readline.createInterface({
-    input: fs.createReadStream(file, { encoding: "utf-8" }),
-    crlfDelay: Infinity,
-  });
-  for await (const line of rl) {
-    if (line.indexOf('"usage"') === -1) continue;
-    let o: any;
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const msg = o?.message;
-    if (!msg?.usage || !msg?.model || msg.model === "<synthetic>") continue;
-    contextTokens = inputSideTokens(msg.usage);
-    model = msg.model;
-    const ts = Date.parse(o.timestamp || "");
-    if (Number.isFinite(ts)) {
+  const input = fs.createReadStream(file, { encoding: "utf-8" });
+  const rl = readline.createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (line.indexOf('"usage"') === -1) continue;
+      let o: any;
+      try {
+        o = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const msg = o?.message;
+      if (!msg?.usage || !msg?.model || msg.model === "<synthetic>") continue;
+      const ts = Date.parse(o.timestamp || "");
+      if (!Number.isFinite(ts)) continue;
+      if (ts >= latestTs) {
+        latestTs = ts;
+        contextTokens = inputSideTokens(msg.usage);
+        model = msg.model;
+      }
       recentTs.push(ts);
       if (recentTs.length > RECENT) recentTs.shift();
     }
+  } finally {
+    rl.close();
+    input.destroy();
   }
   if (contextTokens === null) return null;
+  // Use the by-time latest, not the by-position last, for last-activity too —
+  // and sort recentTs so the turns/hour denominator reflects real chronology.
+  recentTs.sort((a, b) => a - b);
   const lastTurnTs = recentTs.length ? recentTs[recentTs.length - 1] : 0;
   // turns/hour over the recent window (guard against a zero/tiny span).
   let turnsPerHour = 0;
@@ -311,43 +352,65 @@ export async function projectCompactOpportunity(
 // Armed-inject safety read: is the agent idle (last turn ENDED, quiet ≥15s,
 // not mid-tool-call) and how many real turns has it taken since its consent
 // signal? Streams the session transcript once. Used only in the inject path.
+//
+// LATEST-TS GUARD: same as latestTurnEconomics — JSONL transcripts can have
+// branched/resumed lines whose by-position order is not by-time order. The
+// idle decision must compare against the chronologically-latest turn, not the
+// last line in the file. Without this guard an older "end_turn" line that
+// happens to be last in the file lets the gate think the agent is idle while
+// the live session is mid-tool-call → /compact lands mid-work.
+//
+// STREAM CLEANUP: try/finally with explicit rl.close() + input.destroy().
 async function armGate(
   file: string,
   checkpointTs: number | null
 ): Promise<{ idle: boolean; turnsSinceSignal: number; detail: string }> {
-  let last: { type: string; stop: string | null; ts: number; toolUse: boolean } | null = null;
+  let latest: {
+    type: string;
+    stop: string | null;
+    ts: number;
+    toolUse: boolean;
+  } | null = null;
   let turnsSince = 0;
-  const rl = readline.createInterface({
-    input: fs.createReadStream(file, { encoding: "utf-8" }),
-    crlfDelay: Infinity,
-  });
-  for await (const line of rl) {
-    if (line.indexOf('"type"') === -1) continue;
-    let o: any;
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
+  const input = fs.createReadStream(file, { encoding: "utf-8" });
+  const rl = readline.createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (line.indexOf('"type"') === -1) continue;
+      let o: any;
+      try {
+        o = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (o.type !== "user" && o.type !== "assistant") continue;
+      const m = o.message || {};
+      let toolUse = false;
+      if (Array.isArray(m.content))
+        for (const b of m.content) if (b && b.type === "tool_use") toolUse = true;
+      const ts = Date.parse(o.timestamp || "");
+      if (!Number.isFinite(ts)) continue;
+      if (latest === null || ts >= latest.ts) {
+        latest = { type: o.type, stop: m.stop_reason ?? null, ts, toolUse };
+      }
+      if (checkpointTs != null && ts > checkpointTs) turnsSince++;
     }
-    if (o.type !== "user" && o.type !== "assistant") continue;
-    const m = o.message || {};
-    let toolUse = false;
-    if (Array.isArray(m.content)) for (const b of m.content) if (b && b.type === "tool_use") toolUse = true;
-    const ts = Date.parse(o.timestamp || "") || 0;
-    last = { type: o.type, stop: m.stop_reason ?? null, ts, toolUse };
-    if (checkpointTs != null && ts > checkpointTs) turnsSince++;
+  } finally {
+    rl.close();
+    input.destroy();
   }
-  if (!last) return { idle: false, turnsSinceSignal: 999, detail: "no real turns" };
-  const ageSec = (Date.now() - last.ts) / 1000;
+  if (!latest)
+    return { idle: false, turnsSinceSignal: 999, detail: "no real turns" };
+  const ageSec = (Date.now() - latest.ts) / 1000;
   const idle =
-    last.type === "assistant" &&
-    (last.stop === "end_turn" || last.stop === "stop_sequence") &&
-    !last.toolUse &&
+    latest.type === "assistant" &&
+    (latest.stop === "end_turn" || latest.stop === "stop_sequence") &&
+    !latest.toolUse &&
     ageSec >= 15;
   return {
     idle,
     turnsSinceSignal: turnsSince,
-    detail: `last=${last.type}/${last.stop} age=${ageSec.toFixed(0)}s turnsSinceSignal=${turnsSince}`,
+    detail: `last=${latest.type}/${latest.stop} age=${ageSec.toFixed(0)}s turnsSinceSignal=${turnsSince}`,
   };
 }
 
@@ -504,9 +567,22 @@ export function startContextWatcher(): ContextWatcherHandle {
           // crashes between the inject and the latch, it must NOT re-fire on
           // restart — so the latch lands first. Injection failing is recoverable
           // (re-enable manually); a double-inject is not (you can't un-inject).
+          //
+          // LATCH FAILURE GUARD: writeContextWatcherSettings can throw on a
+          // full disk / permission error. If the latch fails we MUST NOT
+          // proceed to inject — otherwise the entire latch-first design is
+          // defeated (next tick re-passes gates, fires again, etc.). Skip
+          // this agent and log loudly so the operator notices.
           if (s.oneShot) {
-            writeContextWatcherSettings({ enabled: false });
-            logLine(`ONE-SHOT LATCH set (enabled=false) before firing ${a.role}`);
+            try {
+              writeContextWatcherSettings({ enabled: false });
+              logLine(`ONE-SHOT LATCH set (enabled=false) before firing ${a.role}`);
+            } catch (e: any) {
+              logLine(
+                `LATCH-FAILED role=${a.role} reason=${e?.message ?? String(e)} ${econStr} ${gates} action=skip-inject`
+              );
+              continue;
+            }
           }
           const result = injectKeystroke(candidate, s.message);
           summary.injected++;
