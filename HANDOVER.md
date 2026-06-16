@@ -2,11 +2,98 @@
 
 > **Purpose:** First thing to read when resuming work on the claudelink package itself. `CLAUDE.md` is the always-on directive layer; this file is the session-resume pointer.
 >
-> **Last session:** 2026-05-29
+> **Last session:** 2026-06-12 (overnight stabilization pass)
 
 ---
 
-## Current status: v1.4.3 LIVE on npm; major build wave on `feat/fleet-token-meter` (unpublished, partially un-deployed); first end-to-end armed auto-compact succeeded; C1 fail-closed whitelist built and ready; standing-on rollout awaiting founder direct go + worker-role picks
+## Current status: stabilization pass complete on `feat/fleet-token-meter` — 6 safety-critical fixes from a parallel architect+code-reviewer audit, 71-test smoke harness, backlog reconciled. Branch still unmerged + unpublished + un-deployed; standing-on rollout still awaiting the redesign (per `docs/auto-compact-redesign-2026-06-11.md`).
+
+### 2026-06-12 overnight pass — what happened
+
+User asked for an aggressive regression + stabilization pass: parallel architect + code-reviewer, dead-code hunt, backlog reconcile, integration tests. Output:
+
+**Audits run:** three parallel subagents — Plan (architect), `coderabbit:code-reviewer` (line-by-line), Explore (dead-code).
+- Dead-code Explore: zero unused imports / orphans / dead branches / stale TODOs. Codebase is remarkably clean.
+- Code-reviewer: 3 P0 + 13 P1 + 7 P2 + 3 P3 findings.
+- Plan (architect): one major addition — stale `transcript_path` from v3 trusted without recency check, "single biggest architectural risk."
+
+**Backlog reconciled** into two files at repo root:
+- `backlog-done.md` — every shipped release (v1.1.0 → v1.4.3) + every built/verified item on the branch + empirically-verified production events.
+- `backlog-open.md` — priority-ordered (4 P0 / 7 P1 / 11 P2 / 6 P3) with why/what/acceptance/owner/blocking/estimate for each item.
+
+**SAFETY-CRITICAL fixes APPLIED + COMMITTED** (commit `dc8979d`, all on currently-disabled paths so live behavior is unchanged):
+1. **F1 — armGate idle uses BY-TIME latest line, not by-position last.** Branched/resumed JSONL transcripts can have a chronologically-older "end_turn" line at the file tail; the original code would trust it and `/compact` could land mid-tool-call. Now uses latest-ts guard.
+2. **F3 — Same fix in `latestTurnEconomics`.** Economic gate was comparing against stale `contextTokens` from an older branch.
+3. **F5 — One-shot latch wrapped in try/catch.** If `writeContextWatcherSettings` threw (full disk / chmod), the latch silently didn't land and `injectKeystroke` still ran → entire "latch first, crash-safe" design defeated. Now logs `LATCH-FAILED` and skips the inject.
+4. **F10 — `handoff_path` now restricted to `~/.claudelink/handoffs/`.** Before: agent could call `signal_checkpoint({handoff_path:"/etc/passwd"})` and downstream `verifyHandoff` size-check passed. Now validated at the tool ingress; rejected paths are surfaced in the tool response so the agent gets feedback.
+5. **F13 — `verifyHandoff` rejects unfilled placeholders.** `HANDOFF_TEMPLATE` itself is ~270 bytes so satisfied the original `>200 byte` gate; an agent writing nothing past the stub would pass. Now scans for any of `HANDOFF_PLACEHOLDERS` still present.
+6. **Plan-1 — `resolveSession` recency check.** Trusted captured `transcript_path` even when stale. If an agent's Claude Code session was replaced in the same terminal (no re-register firing the hook), the watcher would score gates against a DEAD transcript and inject `/compact` into a LIVE DIFFERENT session. Now requires `mtime` within `TRANSCRIPT_STALE_MS=30min`; stale falls back to ambiguous heuristic.
+
+**Smaller correctness fixes also in `dc8979d`:**
+- F4 — heartbeat `setInterval` was leaked: never cleared on SIGINT/SIGTERM, accumulated one per re-register. Now stashed + cleared on shutdown.
+- F11 — three async HTTP endpoints used `.then(ok).catch(err)` which could double-send on a `send(200)` throw. Switched to `.then(ok, err)`.
+- F15 — `latestTurnEconomics` didn't close its readstream on throw. Now `try/finally` with `rl.close()` + `input.destroy()`.
+- F16 — usage-reader's `register` tool_use match was `String.includes("register")` — would leak through `register_user`. Now exact match against `register` / `*__register` / `mcp__claudelink__register`.
+- F19 — `cleanAllowlist` now trims whitespace + dedupes. Before: `["dev", "dev "]` would pass as two distinct allowlist entries.
+- Plan-2 — fixed three-way agent-facing inconsistency: `CHECKPOINT_INSTRUCTIONS` said armed, tool description + tool result said observe-only. Rewrote both to match the armed reality with explicit allowlist semantics.
+- Plan-3 — `handoff_path` was `required` in the input schema but `optional` in instructions. Now optional in both.
+
+**Smoke-test harness scaffolded** (commits `8ebd315` + `ba2fc7d`, **zero test infra existed before**):
+- Runner: node:test + tsx (one small dev dep) + @playwright/test for E2E.
+- **71 tests passing** in ~1.4s:
+  - DB migrations v1→v4 idempotent + `setCheckpoint`/`setAgentSession` round-trip
+  - `cleanAllowlist` trim/dedupe + settings clamp + default-fail-closed
+  - Handoff safety: `HANDOFF_TEMPLATE` verbatim rejected, placeholder scan, `isHandoffPathSafe` enforces under `HANDOFF_DIR`, rejects `/etc/passwd` + sibling-traps + relative-traversal
+  - **F1/F3 latest-ts regression** (the gate-lying bug): `latestTurnEconomics` + `armGate` must pick by-time-latest, not by-position-last
+  - Recovery Watcher patterns: new 2026-05-29 safety-classifier pattern + all existing rate-limit shapes + distance-from-end guard + closest-to-end matching (v1.4.2 regression) + signature canonicalization
+  - HTTP smoke: `/api/heartbeat`, `/`, `/favicon.svg`, `/api/state`, `/api/context-watcher` GET+POST, `/api/recovery-watcher`, `/api/scheduler`, `/api/usage`, `/api/agent-timeline`, 404 path
+- 4 Playwright E2E tests (UI smoke). Listed cleanly via `npx playwright test --list`. **One-time setup before first run:** `npx playwright install chromium`.
+- Test isolation: env-var pattern (`CLAUDELINK_DB_PATH`, `CLAUDELINK_CONTEXT_WATCHER_SETTINGS`, `CLAUDELINK_UI_NO_SERVICES`) evaluated at call time (not module load) so tests can set them after static-import hoisting brings the modules in. **No behavior change in production** — env unset → defaults.
+
+**Commands you'll use tomorrow:**
+- `npm test` — node-test suite, ~1.4s
+- `npm run test:e2e` — Playwright (after one-time `npx playwright install chromium`)
+- `npm run test:all` — both
+
+### What's still open (priority-ordered, full detail in `backlog-open.md`)
+
+**P0 (ship-blocker — required before any next standing-on arming):**
+1. Per-tick gate-status logging (instrument-first) — `gate-status role=X arming=B signal_age_turns=N signal_age_min=M handoff_ok=B idle=B ambiguous=B occupancy_pct=N`. Required so the next rollout has a 24h success-criterion instead of a week-long mystery.
+2. Per-model proportional threshold — replace `dollarPerTurnThreshold` with `contextOccupancyThreshold = 50%` per Founder Advisor recommendation, with model→window lookup. The biggest reason zero autonomous fires happened during the 2026-05-30 standing-on.
+3. ~~Silent handoff_path failure~~ → **PARTIALLY CLOSED tonight (`signal_checkpoint` now returns feedback on bad paths).** Remaining: `verifyHandoff` invocation inside the gate-skip path could ALSO surface to an audit log so operators see "agent X tried but couldn't qualify."
+
+**P1 (standing-on reliability — do alongside the next rollout):**
+- Pre-create handoff stub (eliminates "where do I write" friction)
+- Loosen `freshConsent` to hybrid time+turn rule (current 5 transcript-line budget is too tight for Opus quick-turns; this also subsumes code-reviewer's F2)
+- Graded escalating Stop-hook nudge (50/75/90/100%)
+- Retry-on-transient-fail in armed inject (ETIMEDOUT shouldn't latch)
+- Per-role coordinator threshold (Founder Advisor + clawdemy-lead differ from workers)
+- Recovery Watcher false-fire tightening (older rate-limit patterns; new classifier OK)
+- Item 4 hook deployment broader coverage (UI flag showing which agents owe a Stop-hook fire)
+
+**P2 (polish + observability):** ambiguity-flag false-positive sampling, MCP-session-restart unit test, Apple Terminal support, UI auth, scheduler stale-unread backoff, per-tty keystroke mutex across injectors, recovery-watcher re-escalation, async execFile, "last visible block above empty prompt" anchoring, MCP `disallowedTools` doc note.
+
+**P3 (v1.5 roadmap):** broadcast fan-out, NexusBackend interface, spoke daemon, schema v5, structural pause-point injection, threshold-relative-to-work-done.
+
+### Hard constraints honored tonight
+- ✅ NO merge to main (branch still unmerged)
+- ✅ NO npm publish (still v1.4.3 on registry)
+- ✅ NO push to origin (verify by inspection: `git log origin/feat/fleet-token-meter` will lag behind local)
+- ✅ NO `npm install -g .` (deploy-class)
+- ✅ NO Command Center restart (running pid is still on pre-tonight code)
+- ✅ NO refactoring of armed-inject behavior — fixed correctness bugs only, no design changes to a path that needs live supervision to verify
+- ✅ Two artifacts (`compact-analysis.json`, `fleet-token-meter.png`) intentionally NOT staged — they contain real agent names / per-run analysis that the prior memory entries flag as redact-before-commit
+- ✅ Honest framing — when the user said "Playwright + integration + API tests" the truth was zero test infra existed; built a real harness rather than pretending tests passed
+
+### Tomorrow's takeoff checklist
+1. Read `backlog-done.md` + `backlog-open.md` at repo root.
+2. `npm test` — should be 71/71 green.
+3. Decide: (a) Founder Advisor reply on whitelist arm sequence is still outstanding (untouched tonight); (b) human label on Global Sites Developer's post-compact behavior from 2026-05-29 (the first calibration data point) still owed; (c) when ready to re-attempt standing-on, the P0-1 instrument-first + P0-2 per-model threshold are the pre-arming gates.
+4. Push to origin when ready: `git push origin feat/fleet-token-meter`.
+
+---
+
+## Prior pickup status: v1.4.3 LIVE on npm; major build wave on `feat/fleet-token-meter` (unpublished, partially un-deployed); first end-to-end armed auto-compact succeeded; C1 fail-closed whitelist built and ready; standing-on rollout awaiting founder direct go + worker-role picks
 
 **Branch:** `feat/fleet-token-meter` (head `ad7ef82`). v1.4.3 (commit `87fbf3e`) shipped to npm; everything else on the branch is local + symlinked into the global `claudelink` (so newly-spawned `claudelink-server` processes pick it up, running daemons don't until restarted).
 
