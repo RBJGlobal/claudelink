@@ -187,7 +187,11 @@ interface TurnEconomics {
 //
 // STREAM CLEANUP: try/finally with explicit rl.close() so a transient error
 // mid-stream doesn't leak the file handle.
-async function latestTurnEconomics(file: string): Promise<TurnEconomics | null> {
+// Exported for testability — the latest-ts guard regression is easy to lose
+// without a pinning test.
+export async function latestTurnEconomics(
+  file: string
+): Promise<TurnEconomics | null> {
   let contextTokens: number | null = null;
   let model = "";
   let latestTs = -Infinity;
@@ -361,7 +365,9 @@ export async function projectCompactOpportunity(
 // the live session is mid-tool-call → /compact lands mid-work.
 //
 // STREAM CLEANUP: try/finally with explicit rl.close() + input.destroy().
-async function armGate(
+// Exported for testability — gate-lying regressions are the most
+// safety-critical thing we can catch in a test.
+export async function armGate(
   file: string,
   checkpointTs: number | null
 ): Promise<{ idle: boolean; turnsSinceSignal: number; detail: string }> {

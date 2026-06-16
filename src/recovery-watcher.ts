@@ -231,7 +231,9 @@ function computeSignature(scrollback: string, match: RegExpMatchArray): string {
 // onto the first (out-of-range) copy and silently skipped, leaving real
 // stuck terminals un-nudged. Iterating all matches and picking the
 // nearest-to-end is what guarantees a stuck error gets caught.
-function detectError(scrollback: string): { pattern: RegExp; signature: string } | null {
+// Exported for testability — pattern-matching regressions are the easiest
+// place for false-positive / false-negative bugs to creep back in.
+export function detectError(scrollback: string): { pattern: RegExp; signature: string } | null {
   let best: { match: RegExpExecArray; pattern: RegExp; distanceFromEnd: number } | null = null;
   for (const re of ERROR_PATTERNS) {
     // Force a global flag so exec() iterates rather than locking to first.

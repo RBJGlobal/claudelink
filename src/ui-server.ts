@@ -29,7 +29,13 @@ import {
 import { analyzeCompactEvents } from "./compact-analyzer.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
-const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
+const DEFAULT_DB_PATH = path.join(NEXUS_DIR, "nexus.db");
+// Honors CLAUDELINK_DB_PATH for test isolation. Evaluated at call time
+// (not module load) so tests can set the env var AFTER static-import
+// hoisting brings this module in.
+function DB_PATH(): string {
+  return process.env.CLAUDELINK_DB_PATH || DEFAULT_DB_PATH;
+}
 const LOCK_PATH = path.join(NEXUS_DIR, "ui.lock");
 
 interface ServerProc {
@@ -116,7 +122,7 @@ function getState(): {
   recent_messages: any[];
 } {
   const servers = listClaudelinkServers();
-  const db = new Database(DB_PATH, { readonly: false });
+  const db = new Database(DB_PATH(), { readonly: false });
 
   const agents = db
     .prepare(
@@ -199,7 +205,7 @@ const usageCache = new Map<number, { at: number; data: FleetUsage }>();
 const usageInflight = new Map<number, Promise<FleetUsage>>();
 
 async function computeUsage(windowDays: number): Promise<FleetUsage> {
-  const db = new Database(DB_PATH, { readonly: true });
+  const db = new Database(DB_PATH(), { readonly: true });
   let rows: { role: string; pid: number; transcript_path: string | null }[];
   try {
     try {
@@ -254,7 +260,7 @@ async function getAgentTimelines(): Promise<AgentTimeline[]> {
   if (timelineCache && Date.now() - timelineCache.at < TIMELINE_TTL_MS) return timelineCache.data;
   if (timelineInflight) return timelineInflight;
   const p = (async () => {
-    const db = new Database(DB_PATH, { readonly: true });
+    const db = new Database(DB_PATH(), { readonly: true });
     let rows: { role: string; pid: number; transcript_path: string | null }[];
     try {
       try {
@@ -282,7 +288,7 @@ async function getAgentTimelines(): Promise<AgentTimeline[]> {
 }
 
 function healOrphans(): { deleted_messages: number; pruned_agents: number } {
-  const db = new Database(DB_PATH);
+  const db = new Database(DB_PATH());
   const deadAgents = (
     db.prepare(`SELECT id, pid FROM agents`).all() as { id: string; pid: number }[]
   ).filter((a) => !isProcessAlive(a.pid));
@@ -312,7 +318,7 @@ function healOrphans(): { deleted_messages: number; pruned_agents: number } {
 }
 
 function setAutonomousReply(agentId: string, enabled: boolean): boolean {
-  const db = new Database(DB_PATH);
+  const db = new Database(DB_PATH());
   try {
     const r = db
       .prepare(`UPDATE agents SET autonomous_reply = ? WHERE id = ?`)
@@ -324,7 +330,7 @@ function setAutonomousReply(agentId: string, enabled: boolean): boolean {
 }
 
 function removeStaleAgent(agentId: string): boolean {
-  const db = new Database(DB_PATH);
+  const db = new Database(DB_PATH());
   const tx = db.transaction(() => {
     db.prepare(`DELETE FROM messages WHERE from_agent = ?`).run(agentId);
     db.prepare(`DELETE FROM bulletin WHERE from_agent = ?`).run(agentId);
@@ -1284,7 +1290,7 @@ export function startUIServer(port = 7878): http.Server {
       if (req.method === "GET" && p === "/api/compact-analysis") {
         const raw = parseInt(url.searchParams.get("days") || "30", 10);
         const days = Number.isFinite(raw) ? Math.max(1, Math.min(90, raw)) : 30;
-        const db = new Database(DB_PATH, { readonly: true });
+        const db = new Database(DB_PATH(), { readonly: true });
         let rows: { role: string; pid: number }[];
         try {
           rows = db.prepare(`SELECT role, pid FROM agents`).all() as { role: string; pid: number }[];
@@ -1463,7 +1469,7 @@ function startMessageNotifier(): () => void {
 
   let db: Database.Database | null = null;
   try {
-    db = new Database(DB_PATH, { readonly: true });
+    db = new Database(DB_PATH(), { readonly: true });
   } catch {
     return () => {};
   }

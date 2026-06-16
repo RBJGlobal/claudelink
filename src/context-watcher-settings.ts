@@ -16,11 +16,17 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-const SETTINGS_PATH = path.join(
-  os.homedir(),
-  ".claudelink",
-  "context-watcher.json"
-);
+// Settings location: defaults to ~/.claudelink/context-watcher.json. Honors
+// CLAUDELINK_CONTEXT_WATCHER_SETTINGS env var override so tests can run
+// against a temp file without disturbing the live fleet's config.
+// Evaluated on each call (not cached at module load) so tests can set the
+// env var AFTER importing the module.
+function settingsPath(): string {
+  return (
+    process.env.CLAUDELINK_CONTEXT_WATCHER_SETTINGS ||
+    path.join(os.homedir(), ".claudelink", "context-watcher.json")
+  );
+}
 
 export type WatcherMode = "observe" | "inject";
 
@@ -99,6 +105,7 @@ function clampInt(n: number, lo: number, hi: number, dflt: number): number {
 }
 
 export function readContextWatcherSettings(): ContextWatcherSettings {
+  const SETTINGS_PATH = settingsPath();
   try {
     const raw = fs.readFileSync(SETTINGS_PATH, "utf8");
     const parsed = JSON.parse(raw);
@@ -177,6 +184,7 @@ export function writeContextWatcherSettings(
         ? (typeof partial.activeSince === "string" && partial.activeSince.length > 0 ? partial.activeSince : null)
         : current.activeSince,
   };
+  const SETTINGS_PATH = settingsPath();
   const dir = path.dirname(SETTINGS_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const tmp = SETTINGS_PATH + ".tmp";

@@ -66,7 +66,14 @@ export interface BulletinEntry {
 }
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
+// Production path. Tests set CLAUDELINK_DB_PATH so they don't share the
+// live fleet's DB. The constructor reads the env var at the time it runs,
+// so a test setting `process.env.CLAUDELINK_DB_PATH` before `new NexusDB()`
+// gets its own isolated DB file.
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
+function effectiveDbPath(): string {
+  return process.env.CLAUDELINK_DB_PATH || DB_PATH;
+}
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -81,11 +88,13 @@ export class NexusDB {
   private db: Database.Database;
 
   constructor() {
-    if (!fs.existsSync(NEXUS_DIR)) {
-      fs.mkdirSync(NEXUS_DIR, { recursive: true });
+    const dbPath = effectiveDbPath();
+    const dir = path.dirname(dbPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
     }
 
-    this.db = new Database(DB_PATH);
+    this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 5000");
 
