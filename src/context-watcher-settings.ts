@@ -34,9 +34,17 @@ export interface ContextWatcherSettings {
   enabled: boolean;
   mode: WatcherMode;
   intervalSec: number;
-  // ECONOMIC TRIGGER (primary): arm when projected per-turn cache-read cost
-  // crosses this $ threshold. Auto-adjusts across models (Opus arms far earlier
-  // than Haiku for the same context). Replaces the raw-size anchor.
+  // PROPORTIONAL OCCUPANCY TRIGGER (primary, since Stage 0): arm when current
+  // context occupancy crosses this fraction of the model's window. 0.0–1.0.
+  // Replaces dollarPerTurnThreshold as the arming criterion: a per-model
+  // proportional gate is what the panel + Founder Advisor recommended over the
+  // model-blind dollar gate. dollarPerTurnThreshold remains in settings for
+  // backward-compat with existing operator configs and is still logged each
+  // tick for cost observability, but no longer arms by itself.
+  contextOccupancyThreshold: number;
+  // LEGACY DOLLAR TRIGGER (now observability-only as of Stage 0). Retained so
+  // existing operator configs don't break; the value is still computed and
+  // surfaced in each tick's gate-status log, but is NOT the arming criterion.
   dollarPerTurnThreshold: number;
   // The fire-DECISION (separate from the trigger): only (would-)nudge when
   // projected forward savings clearly exceed the handshake overhead. Overhead
@@ -68,6 +76,7 @@ const DEFAULTS: ContextWatcherSettings = {
   enabled: false,
   mode: "observe",
   intervalSec: 120,
+  contextOccupancyThreshold: 0.5,
   dollarPerTurnThreshold: 0.27,
   handshakeOverheadTokens: 5000,
   activeWindowMin: 15,
@@ -104,6 +113,15 @@ function clampInt(n: number, lo: number, hi: number, dflt: number): number {
   return Math.max(lo, Math.min(hi, Math.floor(n)));
 }
 
+// Fractional [0,1]-style threshold, clamped to a sensible operational range.
+// Lower bound 0.10 prevents a typo (0.05) from arming the whole fleet at 10K
+// tokens; upper bound 0.95 keeps any nonzero fire latitude on a model whose
+// window we mis-estimate.
+function clampFrac(n: number, lo: number, hi: number, dflt: number): number {
+  if (!Number.isFinite(n)) return dflt;
+  return Math.max(lo, Math.min(hi, n));
+}
+
 export function readContextWatcherSettings(): ContextWatcherSettings {
   const SETTINGS_PATH = settingsPath();
   try {
@@ -113,6 +131,12 @@ export function readContextWatcherSettings(): ContextWatcherSettings {
       enabled: Boolean(parsed.enabled),
       mode: parsed.mode === "inject" ? "inject" : "observe",
       intervalSec: clampInt(Number(parsed.intervalSec), 30, 600, DEFAULTS.intervalSec),
+      contextOccupancyThreshold: clampFrac(
+        Number(parsed.contextOccupancyThreshold),
+        0.1,
+        0.95,
+        DEFAULTS.contextOccupancyThreshold
+      ),
       dollarPerTurnThreshold:
         Number.isFinite(Number(parsed.dollarPerTurnThreshold)) && Number(parsed.dollarPerTurnThreshold) > 0
           ? Math.max(0.01, Math.min(10, Number(parsed.dollarPerTurnThreshold)))
@@ -149,6 +173,15 @@ export function writeContextWatcherSettings(
       partial.intervalSec !== undefined
         ? clampInt(Number(partial.intervalSec), 30, 600, current.intervalSec)
         : current.intervalSec,
+    contextOccupancyThreshold:
+      partial.contextOccupancyThreshold !== undefined
+        ? clampFrac(
+            Number(partial.contextOccupancyThreshold),
+            0.1,
+            0.95,
+            current.contextOccupancyThreshold
+          )
+        : current.contextOccupancyThreshold,
     dollarPerTurnThreshold:
       partial.dollarPerTurnThreshold !== undefined && Number(partial.dollarPerTurnThreshold) > 0
         ? Math.max(0.01, Math.min(10, Number(partial.dollarPerTurnThreshold)))

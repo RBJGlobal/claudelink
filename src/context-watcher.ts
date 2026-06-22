@@ -32,11 +32,13 @@ import {
   PROJECTS_DIR,
   OPUS_CACHE_READ_PER_MTOK,
   cacheReadPricePerMtok,
+  modelContextWindow,
 } from "./usage-reader.js";
 import {
   readContextWatcherSettings,
   writeContextWatcherSettings,
   ContextWatcherSettings,
+  WatcherMode,
 } from "./context-watcher-settings.js";
 import { injectKeystroke, NudgeCandidate } from "./scheduler.js";
 import { verifyHandoff } from "./compact-executor.js";
@@ -57,6 +59,91 @@ function logLine(line: string): void {
   } catch {
     /* logging never breaks the watcher */
   }
+}
+
+// Per-tick gate-status log — emitted FOR EVERY LIVE AGENT every tick, including
+// agents that exited early (no session, below occupancy threshold, etc.). The
+// instrument-first principle: you cannot tune what you cannot see. A single
+// physical line per agent per tick with every gate's current state plus a
+// `decision=` keyword that the operator can grep for.
+//
+// Backward compatibility for existing log greps: the line embeds
+// `decision=would-nudge`, `decision=inject-ARMED-FIRE`, `decision=inject-skip-*`
+// etc. — anyone grepping for those keywords still matches. The old standalone
+// `would-nudge` / `inject-skip` / `ARMED-FIRE` lines are folded into this one.
+export interface GateStatusFields {
+  role: string;
+  agent_id: string;
+  mode: WatcherMode;
+  decision: string;
+  reason?: string;
+  context?: number;
+  occupancy_pct?: number; // 0-100, one-decimal precision in the log
+  model?: string;
+  per_turn_usd?: number;
+  turns_per_hr?: number;
+  progressing?: boolean;
+  signal_age_min?: number | null; // null sentinel logs as "none"
+  signal_age_turns?: number;
+  safe_to_clear?: 0 | 1;
+  economic_gate?: boolean;
+  ambiguous?: boolean;
+  allowlisted?: boolean;
+  idle?: boolean;
+  fresh_consent?: boolean;
+  handoff_ok?: boolean;
+  net_saved_usd?: number;
+}
+
+function shortModel(m: string): string {
+  return m.replace(/^claude-/, "");
+}
+
+// Exported for testability — log shape regressions silently break operator
+// analysis tooling, so pinning the schema is worth the small surface area.
+export function formatGateStatus(f: GateStatusFields): string {
+  const parts: string[] = [
+    "gate-status",
+    `role=${f.role}`,
+    `agent_id=${f.agent_id}`,
+    `mode=${f.mode}`,
+    `decision=${f.decision}`,
+  ];
+  if (f.reason !== undefined) parts.push(`reason=${f.reason}`);
+  if (f.context !== undefined) parts.push(`context=${f.context}`);
+  if (f.occupancy_pct !== undefined)
+    parts.push(`occupancy_pct=${f.occupancy_pct.toFixed(1)}`);
+  if (f.model !== undefined) parts.push(`model=${shortModel(f.model)}`);
+  if (f.per_turn_usd !== undefined)
+    parts.push(`per_turn_usd=${f.per_turn_usd.toFixed(2)}`);
+  if (f.turns_per_hr !== undefined)
+    parts.push(`turns_per_hr=${f.turns_per_hr.toFixed(1)}`);
+  if (f.progressing !== undefined) parts.push(`progressing=${f.progressing}`);
+  if (f.signal_age_min !== undefined)
+    parts.push(
+      `signal_age_min=${
+        f.signal_age_min === null ? "none" : f.signal_age_min.toFixed(1)
+      }`
+    );
+  if (f.signal_age_turns !== undefined)
+    parts.push(`signal_age_turns=${f.signal_age_turns}`);
+  if (f.safe_to_clear !== undefined)
+    parts.push(`safe_to_clear=${f.safe_to_clear}`);
+  if (f.economic_gate !== undefined)
+    parts.push(`economic_gate=${f.economic_gate}`);
+  if (f.ambiguous !== undefined) parts.push(`ambiguous=${f.ambiguous}`);
+  if (f.allowlisted !== undefined) parts.push(`allowlisted=${f.allowlisted}`);
+  if (f.idle !== undefined) parts.push(`idle=${f.idle}`);
+  if (f.fresh_consent !== undefined)
+    parts.push(`fresh_consent=${f.fresh_consent}`);
+  if (f.handoff_ok !== undefined) parts.push(`handoff_ok=${f.handoff_ok}`);
+  if (f.net_saved_usd !== undefined)
+    parts.push(`net_saved_usd=${f.net_saved_usd.toFixed(2)}`);
+  return parts.join(" ");
+}
+
+function logGateStatus(f: GateStatusFields): void {
+  logLine(formatGateStatus(f));
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -468,24 +555,106 @@ export function startContextWatcher(): ContextWatcherHandle {
 
       for (const a of liveAgents()) {
         summary.checked++;
+
+        // Common header — every emitted gate-status line carries these.
+        const ckMinNum: number | null =
+          a.checkpoint_ts != null ? (now - a.checkpoint_ts) / 60000 : null;
+        const safetyFresh =
+          a.checkpoint_ts != null && now - a.checkpoint_ts < CHECKPOINT_FRESH_MS;
+
         const session = resolveSession(a);
-        if (!session) continue;
+        if (!session) {
+          logGateStatus({
+            role: a.role,
+            agent_id: a.id,
+            mode: s.mode,
+            decision: "skip-no-session",
+            reason: "resolveSession returned null (no transcript dir / stale path / no live session)",
+            signal_age_min: ckMinNum,
+            safe_to_clear: a.checkpoint_safe_to_clear === 1 ? 1 : 0,
+          });
+          continue;
+        }
+
         let econ: TurnEconomics | null;
         try {
           econ = await latestTurnEconomics(session.file);
-        } catch {
+        } catch (e: any) {
+          logGateStatus({
+            role: a.role,
+            agent_id: a.id,
+            mode: s.mode,
+            decision: "skip-econ-error",
+            reason: e?.message ?? String(e),
+            ambiguous: session.ambiguous,
+            signal_age_min: ckMinNum,
+            safe_to_clear: a.checkpoint_safe_to_clear === 1 ? 1 : 0,
+          });
           continue;
         }
-        if (econ === null) continue;
+        if (econ === null) {
+          logGateStatus({
+            role: a.role,
+            agent_id: a.id,
+            mode: s.mode,
+            decision: "skip-no-econ",
+            reason: "no real assistant-with-usage turns in transcript",
+            ambiguous: session.ambiguous,
+            signal_age_min: ckMinNum,
+            safe_to_clear: a.checkpoint_safe_to_clear === 1 ? 1 : 0,
+          });
+          continue;
+        }
 
-        // ── TRIGGER (arms): projected per-turn cache-read cost crosses $threshold.
+        // PROPORTIONAL OCCUPANCY TRIGGER (Stage 0 replacement for the
+        // model-blind dollar gate). Compares current context tokens against
+        // this model's window: e.g. 100K input-side tokens on a 200K-window
+        // model = 50% occupancy, which is the default arming threshold. The
+        // dollar value is still computed for observability but no longer
+        // arms by itself.
+        const windowTokens = modelContextWindow(econ.model);
+        const occupancyFrac = econ.contextTokens / windowTokens;
+        const occupancyPct = occupancyFrac * 100;
         const cacheReadPrice = cacheReadPricePerMtok(econ.model);
         const perTurnCostUsd = (econ.contextTokens * cacheReadPrice) / 1_000_000;
-        if (perTurnCostUsd <= s.dollarPerTurnThreshold) continue;
+
+        if (occupancyFrac <= s.contextOccupancyThreshold) {
+          logGateStatus({
+            role: a.role,
+            agent_id: a.id,
+            mode: s.mode,
+            decision: "below-threshold",
+            context: econ.contextTokens,
+            occupancy_pct: occupancyPct,
+            model: econ.model,
+            per_turn_usd: perTurnCostUsd,
+            turns_per_hr: econ.turnsPerHour,
+            ambiguous: session.ambiguous,
+            signal_age_min: ckMinNum,
+            safe_to_clear: a.checkpoint_safe_to_clear === 1 ? 1 : 0,
+          });
+          continue;
+        }
         summary.flagged++;
 
         const st = state.get(a.role) || { lastNudgedAt: 0, nudgeCount: 0 };
-        if (now - st.lastNudgedAt < cooldownMs) continue; // recently (would-)nudged
+        if (now - st.lastNudgedAt < cooldownMs) {
+          logGateStatus({
+            role: a.role,
+            agent_id: a.id,
+            mode: s.mode,
+            decision: "skip-cooldown",
+            reason: `nudgedAt=${new Date(st.lastNudgedAt).toISOString()} cooldownMin=${s.cooldownMin}`,
+            context: econ.contextTokens,
+            occupancy_pct: occupancyPct,
+            model: econ.model,
+            per_turn_usd: perTurnCostUsd,
+            ambiguous: session.ambiguous,
+            signal_age_min: ckMinNum,
+            safe_to_clear: a.checkpoint_safe_to_clear === 1 ? 1 : 0,
+          });
+          continue;
+        }
 
         // ── DECISION (fires): only act when forward savings clearly beat the
         // handshake overhead, AND the session is actively progressing (else a
@@ -503,44 +672,60 @@ export function startContextWatcher(): ContextWatcherHandle {
         const netSavedTokens = forwardSavedTokens - s.handshakeOverheadTokens;
         const netSavedUsd = (netSavedTokens * cacheReadPrice) / 1_000_000;
         const netPositive = netSavedTokens > 0;
-
-        // SAFETY gate (observe correlation): is there a fresh agent-consented
-        // checkpoint signal? Economic-armed means little if the agent hasn't
-        // marked a safe boundary. both-gates-green = act-worthy in the armed
-        // phase; logged here so the cadence/alignment is visible pre-deploy.
         const economicGreen = activelyProgressing && netPositive;
-        const safetyFresh = a.checkpoint_ts != null && now - a.checkpoint_ts < CHECKPOINT_FRESH_MS;
-        const ckMin = a.checkpoint_ts != null ? ((now - a.checkpoint_ts) / 60000).toFixed(1) : "none";
-        const bothGreen = economicGreen && safetyFresh;
 
-        const econStr =
-          `context=${econ.contextTokens} model=${econ.model.replace("claude-", "")} ` +
-          `per_turn_usd=${perTurnCostUsd.toFixed(2)} turns_per_hr=${econ.turnsPerHour.toFixed(1)} ` +
-          `horizon=${horizonTurns.toFixed(1)} net_saved_usd=${netSavedUsd.toFixed(2)} ` +
-          `progressing=${activelyProgressing} ambiguous=${session.ambiguous} ` +
-          `signal_age_min=${ckMin} safe_to_clear=${a.checkpoint_safe_to_clear} ` +
-          `safety_gate=${safetyFresh} economic_gate=${economicGreen} both_gates_green=${bothGreen}`;
+        // Common fields shared by every remaining decision branch.
+        const commonFields: Partial<GateStatusFields> = {
+          role: a.role,
+          agent_id: a.id,
+          mode: s.mode,
+          context: econ.contextTokens,
+          occupancy_pct: occupancyPct,
+          model: econ.model,
+          per_turn_usd: perTurnCostUsd,
+          turns_per_hr: econ.turnsPerHour,
+          progressing: activelyProgressing,
+          ambiguous: session.ambiguous,
+          signal_age_min: ckMinNum,
+          safe_to_clear: a.checkpoint_safe_to_clear === 1 ? 1 : 0,
+          economic_gate: economicGreen,
+          net_saved_usd: netSavedUsd,
+        };
 
         if (s.mode === "observe") {
           // Nudge path: gate on the session being actively progressing (don't
           // pay handshake overhead on one about to idle) + net-positive.
           if (!(activelyProgressing && netPositive)) {
-            logLine(`hold role=${a.role} ${econStr} reason=${!activelyProgressing ? "idle" : "savings<overhead"}`);
+            logGateStatus({
+              ...(commonFields as GateStatusFields),
+              decision: "observe-hold",
+              reason: !activelyProgressing ? "idle" : "savings<overhead",
+            });
             continue;
           }
           summary.wouldNudge++;
           st.lastNudgedAt = now;
           st.nudgeCount++;
           state.set(a.role, st);
-          logLine(`would-nudge role=${a.role} ${econStr} count=${st.nudgeCount}`);
+          logGateStatus({
+            ...(commonFields as GateStatusFields),
+            decision: "would-nudge",
+            reason: `count=${st.nudgeCount} safety_fresh=${safetyFresh}`,
+          });
         } else {
           // ARMED INJECT (mode "inject"). FAIL-CLOSED ALLOWLIST FIRST: only
           // roles the operator explicitly put on injectAllowlist are ever
           // auto-compacted. An empty/unset list arms NO ONE — this is what makes
           // a standing-on rollout a controlled subset, not fleet-wide. Checked
           // before the transcript scan so non-listed agents are skipped cheaply.
-          if (!s.injectAllowlist.includes(a.role)) {
-            logLine(`inject-skip role=${a.role} reason=not-in-allowlist allowlist=${JSON.stringify(s.injectAllowlist)}`);
+          const allowlisted = s.injectAllowlist.includes(a.role);
+          if (!allowlisted) {
+            logGateStatus({
+              ...(commonFields as GateStatusFields),
+              decision: "inject-skip-allowlist",
+              reason: `allowlist=${JSON.stringify(s.injectAllowlist)}`,
+              allowlisted: false,
+            });
             continue;
           }
           // Then the SAFETY stack — and note compaction wants the agent IDLE,
@@ -555,9 +740,17 @@ export function startContextWatcher(): ContextWatcherHandle {
           const freshConsent =
             a.checkpoint_ts != null && ag.turnsSinceSignal <= MAX_TURNS_SINCE_SIGNAL;
           const handoffOk = !!a.checkpoint_handoff_path && verifyHandoff(a.checkpoint_handoff_path).ok;
-          const gates = `idle=${ag.idle} freshConsent=${freshConsent}(${ag.detail}) handoff=${handoffOk} ambiguous=${session.ambiguous}`;
           if (!(ag.idle && freshConsent && handoffOk && !session.ambiguous)) {
-            logLine(`inject-skip role=${a.role} ${econStr} ${gates}`);
+            logGateStatus({
+              ...(commonFields as GateStatusFields),
+              decision: "inject-skip-safety",
+              reason: ag.detail,
+              allowlisted: true,
+              idle: ag.idle,
+              fresh_consent: freshConsent,
+              handoff_ok: handoffOk,
+              signal_age_turns: ag.turnsSinceSignal,
+            });
             continue;
           }
           // ALL GATES GREEN — inject the consented action (one shot).
@@ -584,9 +777,16 @@ export function startContextWatcher(): ContextWatcherHandle {
               writeContextWatcherSettings({ enabled: false });
               logLine(`ONE-SHOT LATCH set (enabled=false) before firing ${a.role}`);
             } catch (e: any) {
-              logLine(
-                `LATCH-FAILED role=${a.role} reason=${e?.message ?? String(e)} ${econStr} ${gates} action=skip-inject`
-              );
+              logGateStatus({
+                ...(commonFields as GateStatusFields),
+                decision: "inject-LATCH-FAILED",
+                reason: e?.message ?? String(e),
+                allowlisted: true,
+                idle: ag.idle,
+                fresh_consent: freshConsent,
+                handoff_ok: handoffOk,
+                signal_age_turns: ag.turnsSinceSignal,
+              });
               continue;
             }
           }
@@ -595,7 +795,16 @@ export function startContextWatcher(): ContextWatcherHandle {
           st.lastNudgedAt = now;
           st.nudgeCount++;
           state.set(a.role, st);
-          logLine(`ARMED-FIRE role=${a.role} action=${JSON.stringify(s.message)} result=${result} ${econStr} ${gates}`);
+          logGateStatus({
+            ...(commonFields as GateStatusFields),
+            decision: "inject-ARMED-FIRE",
+            reason: `action=${JSON.stringify(s.message)} result=${result}`,
+            allowlisted: true,
+            idle: ag.idle,
+            fresh_consent: freshConsent,
+            handoff_ok: handoffOk,
+            signal_age_turns: ag.turnsSinceSignal,
+          });
           if (s.oneShot) break;
         }
       }
@@ -620,7 +829,9 @@ export function startContextWatcher(): ContextWatcherHandle {
     }, s.intervalSec * 1000);
     logLine(
       `reschedule: enabled mode=${s.mode} intervalSec=${s.intervalSec} ` +
-        `thresholdTokens=${s.thresholdTokens} cooldownMin=${s.cooldownMin}`
+        `occupancyThreshold=${s.contextOccupancyThreshold} ` +
+        `dollarPerTurn(legacy)=${s.dollarPerTurnThreshold} ` +
+        `cooldownMin=${s.cooldownMin}`
     );
   };
 

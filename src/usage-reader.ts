@@ -190,6 +190,20 @@ export function cacheReadPricePerMtok(model: string): number {
   return priceFor(model).cacheRead;
 }
 
+// Model context window (tokens). Default 200K — the standard window for Opus
+// 4.x / Sonnet 4.x / Haiku 4.x. Honors the 1M-context beta when the model id
+// carries the `[1m]` suffix or a `-1m` variant. Used by the per-model
+// proportional-occupancy threshold so the arming criterion is "what fraction
+// of this model's window is currently re-sent each turn" — proportional, not a
+// raw-size or raw-dollar absolute. The 50%-of-window default replaces the
+// model-blind dollar gate the rollout originally shipped with.
+export function modelContextWindow(model: string): number {
+  if (!model) return 200_000;
+  const m = model.toLowerCase();
+  if (m.includes("[1m]") || m.includes("-1m") || m.includes(" 1m")) return 1_000_000;
+  return 200_000;
+}
+
 function localDate(ts: number): string {
   const d = new Date(ts);
   const y = d.getFullYear();
