@@ -254,6 +254,44 @@ test("GET /api/agent-timeline returns a list", async () => {
   assert.ok(r.body !== null);
 });
 
+// ---- Stage 1 fleet view ----
+
+test("GET /api/prompt-clear without ?role returns 400", async () => {
+  const r = await get("/api/prompt-clear");
+  assert.equal(r.status, 400);
+  assert.ok(r.body && typeof r.body.error === "string");
+});
+
+test("GET /api/prompt-clear with an unknown role returns 404", async () => {
+  const r = await get("/api/prompt-clear?role=definitely-not-a-real-role-xyz");
+  assert.equal(r.status, 404);
+  assert.ok(r.body && typeof r.body.error === "string");
+});
+
+test("GET /api/state agent rows expose optional fleet field shape (when present)", async () => {
+  // Best-effort assertion: the planted smoke-agent has a fake pid that's NOT
+  // a live Claude Code session, so its fleet field will be undefined — that's
+  // the correct behavior, not a bug. Just verify the shape contract: alive
+  // agents either have NO fleet (undefined) or a fleet object with the
+  // expected keys. No agent should have a partial / malformed fleet object.
+  const r = await get("/api/state");
+  assert.equal(r.status, 200);
+  assert.ok(Array.isArray(r.body.agents));
+  for (const a of r.body.agents) {
+    if (a.fleet === undefined) continue;
+    assert.equal(typeof a.fleet.context_tokens, "number");
+    assert.equal(typeof a.fleet.occupancy_pct, "number");
+    assert.equal(typeof a.fleet.model, "string");
+    assert.equal(typeof a.fleet.window_tokens, "number");
+    assert.equal(typeof a.fleet.per_turn_usd, "number");
+    assert.ok(
+      a.fleet.handoff_path === null ||
+        typeof a.fleet.handoff_path === "string"
+    );
+    assert.ok([0, 1].includes(a.fleet.safe_to_clear));
+  }
+});
+
 // ---- 404 ----
 
 test("GET /api/nonexistent returns 404", async () => {

@@ -21,12 +21,22 @@ import { readFleetUsage, FleetUsage, readAgentTimelines, AgentTimeline } from ".
 import {
   startContextWatcher,
   ContextWatcherHandle,
+  latestTurnEconomics,
 } from "./context-watcher.js";
 import {
   readContextWatcherSettings,
   writeContextWatcherSettings,
 } from "./context-watcher-settings.js";
 import { analyzeCompactEvents } from "./compact-analyzer.js";
+import {
+  modelContextWindow,
+  cacheReadPricePerMtok,
+  cwdForPid,
+  projectIdFromCwd,
+  PROJECTS_DIR,
+} from "./usage-reader.js";
+import { verifyHandoff } from "./compact-executor.js";
+import { buildPromptClearText } from "./prompt-clear.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DEFAULT_DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -46,6 +56,28 @@ interface ServerProc {
   registeredRole: string | null;
 }
 
+// Stage 1 fleet-view enrichment: optional per-agent fields populated from
+// the agent's LIVE Claude Code transcript. Additive — existing clients reading
+// only id/role/pid stay unaffected. Populated only for alive agents whose
+// transcript can be resolved; absent (undefined) when a value can't be
+// computed (no transcript, no usage line, dead process). The UI renders "-"
+// for absent fields rather than zero, so the operator can tell "no data" from
+// "actually zero".
+interface AgentFleetMetrics {
+  context_tokens: number;
+  occupancy_pct: number; // 0–100+ (overflow possible: 1M-context model on 200K default)
+  model: string;
+  window_tokens: number;
+  per_turn_usd: number;
+  transcript_path: string | null;
+  transcript_mtime_ms: number | null;
+  handoff_path: string | null;
+  handoff_mtime_ms: number | null;
+  handoff_ok: boolean;
+  signal_age_min: number | null;
+  safe_to_clear: 0 | 1;
+}
+
 interface AgentRow {
   id: string;
   role: string;
@@ -57,6 +89,8 @@ interface AgentRow {
   autonomous_reply: number;
   msgs_from: number;
   msgs_to: number;
+  // Stage 1 — populated by enrichAgentsFleet for alive agents only.
+  fleet?: AgentFleetMetrics;
 }
 
 interface Health {
@@ -115,12 +149,120 @@ function isClaudelinkServerPid(pid: number): boolean {
   }
 }
 
-function getState(): {
+// Resolve the live transcript for an alive agent. Reuses the watcher's
+// recency check (stale captured paths fall back to most-recent-in-project-dir
+// rather than scoring the dashboard against a dead transcript).
+const FLEET_TRANSCRIPT_STALE_MS = 30 * 60 * 1000;
+function findFleetTranscript(opts: {
+  pid: number;
+  transcript_path: string | null;
+}): string | null {
+  if (opts.transcript_path) {
+    try {
+      const st = fs.statSync(opts.transcript_path);
+      if (Date.now() - st.mtimeMs < FLEET_TRANSCRIPT_STALE_MS) {
+        return opts.transcript_path;
+      }
+    } catch {
+      /* fall through to heuristic */
+    }
+  }
+  const cwd = cwdForPid(opts.pid);
+  if (!cwd) return null;
+  const dir = path.join(PROJECTS_DIR, projectIdFromCwd(cwd));
+  let files: { file: string; mtime: number }[];
+  try {
+    files = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((f) => {
+        const full = path.join(dir, f);
+        return { file: full, mtime: fs.statSync(full).mtimeMs };
+      });
+  } catch {
+    return null;
+  }
+  if (files.length === 0) return null;
+  files.sort((a, b) => b.mtime - a.mtime);
+  return files[0].file;
+}
+
+// Populate AgentRow.fleet for each alive agent. Best-effort: a per-agent
+// failure logs and skips that agent rather than failing the whole response.
+// All file I/O is read-only; the watcher's enabled/mode setting is unaffected.
+async function enrichAgentsFleet(
+  agents: AgentRow[],
+  checkpointMap: Map<
+    string,
+    {
+      checkpoint_ts: number | null;
+      checkpoint_safe_to_clear: number;
+      checkpoint_handoff_path: string | null;
+      transcript_path: string | null;
+    }
+  >
+): Promise<void> {
+  const now = Date.now();
+  await Promise.all(
+    agents.map(async (a) => {
+      if (!a.alive) return;
+      const ck = checkpointMap.get(a.id);
+      if (!ck) return;
+      const transcript = findFleetTranscript({
+        pid: a.pid,
+        transcript_path: ck.transcript_path,
+      });
+      if (!transcript) return;
+      let mtime: number | null = null;
+      try {
+        mtime = fs.statSync(transcript).mtimeMs;
+      } catch {}
+      let econ: Awaited<ReturnType<typeof latestTurnEconomics>>;
+      try {
+        econ = await latestTurnEconomics(transcript);
+      } catch {
+        econ = null;
+      }
+      if (!econ) return;
+      const window = modelContextWindow(econ.model);
+      const perTurnUsd =
+        (econ.contextTokens * cacheReadPricePerMtok(econ.model)) / 1_000_000;
+      let handoffOk = false;
+      let handoffMtime: number | null = null;
+      if (ck.checkpoint_handoff_path) {
+        try {
+          handoffOk = verifyHandoff(ck.checkpoint_handoff_path).ok;
+          handoffMtime = fs.statSync(ck.checkpoint_handoff_path).mtimeMs;
+        } catch {
+          handoffOk = false;
+        }
+      }
+      const signalAgeMin =
+        ck.checkpoint_ts != null ? (now - ck.checkpoint_ts) / 60000 : null;
+      a.fleet = {
+        context_tokens: econ.contextTokens,
+        occupancy_pct: (econ.contextTokens / window) * 100,
+        model: econ.model,
+        window_tokens: window,
+        per_turn_usd: perTurnUsd,
+        transcript_path: transcript,
+        transcript_mtime_ms: mtime,
+        handoff_path: ck.checkpoint_handoff_path,
+        handoff_mtime_ms: handoffMtime,
+        handoff_ok: handoffOk,
+        signal_age_min: signalAgeMin,
+        safe_to_clear: ck.checkpoint_safe_to_clear === 1 ? 1 : 0,
+      };
+    })
+  );
+}
+
+async function getState(): Promise<{
   servers: ServerProc[];
   agents: AgentRow[];
   health: Health;
   recent_messages: any[];
-} {
+}> {
   const servers = listClaudelinkServers();
   const db = new Database(DB_PATH(), { readonly: false });
 
@@ -134,6 +276,37 @@ function getState(): {
          ORDER BY a.registered_at DESC`
     )
     .all() as Omit<AgentRow, "alive">[];
+
+  // Pull the checkpoint columns separately — older DBs may not have them.
+  // Wrapped in try so a pre-v3 schema doesn't break the fleet view, just
+  // leaves the fleet field undefined for those agents.
+  const checkpointMap = new Map<
+    string,
+    {
+      checkpoint_ts: number | null;
+      checkpoint_safe_to_clear: number;
+      checkpoint_handoff_path: string | null;
+      transcript_path: string | null;
+    }
+  >();
+  try {
+    const ckRows = db
+      .prepare(
+        `SELECT id, checkpoint_ts, checkpoint_safe_to_clear,
+                checkpoint_handoff_path, transcript_path
+           FROM agents`
+      )
+      .all() as Array<{
+      id: string;
+      checkpoint_ts: number | null;
+      checkpoint_safe_to_clear: number;
+      checkpoint_handoff_path: string | null;
+      transcript_path: string | null;
+    }>;
+    for (const r of ckRows) checkpointMap.set(r.id, r);
+  } catch {
+    /* pre-v3 schema — fleet enrichment will be a no-op */
+  }
 
   const enriched: AgentRow[] = agents.map((a) => ({
     ...a,
@@ -173,6 +346,16 @@ function getState(): {
     .all();
 
   db.close();
+
+  // Stage 1 — enrich each ALIVE agent with live fleet metrics (context %, $,
+  // handoff mtime, etc.). Best-effort: per-agent failures fall through silently
+  // so a single bad transcript never breaks the dashboard. Performed AFTER the
+  // DB is closed so the enrichment scan doesn't keep the DB handle hot.
+  try {
+    await enrichAgentsFleet(enriched, checkpointMap);
+  } catch {
+    /* whole-batch failure → dashboard still renders without fleet column */
+  }
 
   return {
     servers,
@@ -459,6 +642,15 @@ const HTML = String.raw`<!doctype html>
   .nudge-status.show { opacity: 1; }
   .nudge-hint { color: var(--muted); font-size: 12px; padding: 0 16px 14px; line-height: 1.5; margin: 0; }
   .nudge-hint .mono { color: var(--text); }
+  /* Fleet — live context (Stage 1) */
+  .fleet-tbl td { vertical-align: middle; }
+  .occ-bar { position: relative; width: 140px; height: 10px; background: var(--panel-2); border-radius: 5px; overflow: hidden; border: 1px solid var(--border); }
+  .occ-bar .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); transition: width 0.2s; }
+  .occ-bar .fill.warn { background: var(--amber); }
+  .occ-bar .fill.bad  { background: var(--red); }
+  .occ-pct { font-family: var(--mono, monospace); font-size: 11px; color: var(--muted); margin-left: 8px; min-width: 38px; display: inline-block; text-align: right; }
+  .pill.ok   { background: rgba(61,220,132,0.15); color: var(--green); }
+  .pill.miss { background: rgba(120,120,140,0.15); color: var(--muted); }
   /* Fleet Token Meter */
   .usage-summary { display: flex; gap: 14px; flex-wrap: wrap; padding: 4px 16px 12px; }
   .usage-stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; min-width: 120px; }
@@ -559,6 +751,28 @@ const HTML = String.raw`<!doctype html>
         <thead><tr><th>Role</th><th>PID</th><th>Status</th><th>Auto-reply</th><th>Msgs</th><th>Last seen</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
+    </div>
+  </section>
+
+  <section class="panel full">
+    <h2>Fleet — live context <span class="count" id="fleet-count">0</span></h2>
+    <div class="body">
+      <table id="fleet-table" class="fleet-tbl">
+        <thead><tr>
+          <th>Role</th>
+          <th>Model</th>
+          <th style="text-align:right">Context</th>
+          <th>Occupancy</th>
+          <th style="text-align:right">$/turn</th>
+          <th>Handoff</th>
+          <th>Last signal</th>
+          <th></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="nudge-hint">
+        Per-agent live context occupancy, sorted by % desc — most-urgent first. The "Copy prompt" button copies the operator's standard "your context is high, ready to clear/compact?" prompt with that agent's measured numbers interpolated. <strong>The button never types into a terminal</strong> — you paste it manually. Same source of truth as <span class="mono">claudelink prompt-clear</span>.
+      </p>
     </div>
   </section>
 
@@ -786,6 +1000,11 @@ function render(state) {
     ? "Nothing to heal — DB is clean."
     : "Will remove dead-agent rows and any messages that would block their cleanup.";
 
+  // Stage 1 — fleet table (live context per alive agent, sorted by occupancy
+  // desc). Only renders agents that have fleet metrics; offline agents and
+  // alive-but-no-transcript agents are excluded — they'd just be noise.
+  renderFleet(state);
+
   // messages
   $("msg-count").textContent = state.recent_messages.length;
   const mb = $("msg-body");
@@ -812,6 +1031,73 @@ function render(state) {
 function escapeHtml(s) {
   if (s === null || s === undefined) return "";
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+function fmtAge(ms) {
+  if (ms === null || ms === undefined) return "—";
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 60) return s + "s ago";
+  const m = Math.round(s / 60);
+  if (m < 60) return m + "m ago";
+  const h = Math.round(m / 60);
+  if (h < 48) return h + "h ago";
+  return Math.round(h / 24) + "d ago";
+}
+
+function renderFleet(state) {
+  const fb = $("fleet-table").querySelector("tbody");
+  const rows = state.agents
+    .filter((a) => a.alive && a.fleet)
+    .slice()
+    .sort((a, b) => b.fleet.occupancy_pct - a.fleet.occupancy_pct);
+  $("fleet-count").textContent = rows.length;
+  fb.innerHTML = "";
+  if (rows.length === 0) {
+    fb.innerHTML = '<tr><td colspan="8" class="empty">No live fleet data — either no agents online, or their transcripts have no usage records yet.</td></tr>';
+    return;
+  }
+  for (const a of rows) {
+    const f = a.fleet;
+    const pct = f.occupancy_pct;
+    const fillCls = pct >= 100 ? "bad" : pct >= 75 ? "warn" : "";
+    const barWidth = Math.min(100, Math.max(0, pct));
+    const ctxK = Math.round(f.context_tokens / 1000);
+    const winK = Math.round(f.window_tokens / 1000);
+    const handoffCell = f.handoff_ok
+      ? '<span class="pill ok">● fresh</span> <span class="mono">' + fmtAge(f.handoff_mtime_ms) + '</span>'
+      : f.handoff_path
+        ? '<span class="pill warn">● stale</span> <span class="mono">' + fmtAge(f.handoff_mtime_ms) + '</span>'
+        : '<span class="pill miss">— none</span>';
+    const sigCell = f.signal_age_min === null
+      ? '<span class="pill miss">— none</span>'
+      : '<span class="mono">' + (f.signal_age_min < 60 ? f.signal_age_min.toFixed(1) + 'm' : (f.signal_age_min/60).toFixed(1) + 'h') + ' ago</span>' +
+        (f.safe_to_clear ? ' <span class="pill ok">safe</span>' : '');
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      '<td>' + escapeHtml(a.role) + '</td>' +
+      '<td class="mono">' + escapeHtml(f.model.replace(/^claude-/, "")) + '</td>' +
+      '<td class="mono" style="text-align:right">' + ctxK + 'K / ' + winK + 'K</td>' +
+      '<td><div style="display:flex;align-items:center"><div class="occ-bar"><div class="fill ' + fillCls + '" style="width:' + barWidth.toFixed(1) + '%"></div></div><span class="occ-pct">' + pct.toFixed(0) + '%</span></div></td>' +
+      '<td class="mono" style="text-align:right">$' + f.per_turn_usd.toFixed(2) + '</td>' +
+      '<td>' + handoffCell + '</td>' +
+      '<td>' + sigCell + '</td>' +
+      '<td><button class="row-action" data-copy-prompt="' + escapeHtml(a.role) + '">Copy prompt</button></td>';
+    fb.appendChild(tr);
+  }
+}
+
+async function copyPromptForRole(role) {
+  try {
+    const r = await api("/api/prompt-clear?role=" + encodeURIComponent(role), "GET");
+    if (!r || !r.text) {
+      toast("No prompt text returned for " + role, "error");
+      return;
+    }
+    await navigator.clipboard.writeText(r.text);
+    toast("Prompt for " + role + " copied — paste into that terminal.");
+  } catch (e) {
+    toast("Copy failed: " + (e && e.message ? e.message : String(e)), "error");
+  }
 }
 
 function setPollInterval(ms) {
@@ -847,6 +1133,7 @@ document.addEventListener("click", async (e) => {
   if (!(t instanceof HTMLElement)) return;
   const killPid = t.getAttribute("data-kill-pid");
   const removeId = t.getAttribute("data-remove-id");
+  const copyPromptRole = t.getAttribute("data-copy-prompt");
   if (killPid) {
     if (!confirm("Kill PID " + killPid + " (claudelink-server)?")) return;
     try {
@@ -861,6 +1148,10 @@ document.addEventListener("click", async (e) => {
       toast("Stale agent removed");
       refresh();
     } catch (err) { toast(err.message, "error"); }
+  } else if (copyPromptRole) {
+    // Stage 1 fleet-view "Copy prompt" — never types into a terminal; just
+    // copies the operator's measured-numbers prompt to clipboard.
+    copyPromptForRole(copyPromptRole);
   }
 });
 
@@ -1197,7 +1488,7 @@ export function startUIServer(port = 7878): http.Server {
   let schedulerHandle: SchedulerHandle | null = null;
   let recoveryWatcherHandle: RecoveryWatcherHandle | null = null;
   let contextWatcherHandle: ContextWatcherHandle | null = null;
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     const send = (status: number, body: any, contentType = "application/json") => {
       res.statusCode = status;
       res.setHeader("Content-Type", contentType);
@@ -1219,7 +1510,7 @@ export function startUIServer(port = 7878): http.Server {
         return send(200, { ok: true, pid: process.pid });
       }
       if (req.method === "GET" && p === "/api/state") {
-        return send(200, getState());
+        return send(200, await getState());
       }
       if (req.method === "POST" && p === "/api/heal") {
         return send(200, healOrphans());
@@ -1286,6 +1577,65 @@ export function startUIServer(port = 7878): http.Server {
       }
       if (req.method === "GET" && p === "/api/context-watcher") {
         return send(200, readContextWatcherSettings());
+      }
+      // Stage 1 — returns the operator's standard "your context is high"
+      // prompt with the named agent's measured numbers interpolated. Used by
+      // the fleet-view's per-row "copy prompt" button. Read-only: no terminal
+      // write, no /clear or /compact fired. The operator pastes manually.
+      if (req.method === "GET" && p === "/api/prompt-clear") {
+        const role = url.searchParams.get("role");
+        if (!role) {
+          return send(400, { error: "missing required query param: role" });
+        }
+        const db2 = new Database(DB_PATH(), { readonly: true });
+        let row: {
+          pid: number;
+          transcript_path: string | null;
+        } | undefined;
+        try {
+          row = db2
+            .prepare(
+              `SELECT pid, transcript_path FROM agents WHERE role = ? LIMIT 1`
+            )
+            .get(role) as
+            | { pid: number; transcript_path: string | null }
+            | undefined;
+        } finally {
+          db2.close();
+        }
+        if (!row) {
+          return send(404, { error: `no registered agent with role "${role}"` });
+        }
+        const transcript = findFleetTranscript({
+          pid: row.pid,
+          transcript_path: row.transcript_path,
+        });
+        if (!transcript) {
+          return send(404, {
+            error: `no live session transcript for "${role}"`,
+          });
+        }
+        latestTurnEconomics(transcript).then(
+          (econ) => {
+            if (!econ) {
+              return send(404, {
+                error: `no usage records in transcript for "${role}" yet`,
+              });
+            }
+            const text = buildPromptClearText({
+              role,
+              model: econ.model,
+              contextTokens: econ.contextTokens,
+              windowTokens: modelContextWindow(econ.model),
+              perTurnUsd:
+                (econ.contextTokens * cacheReadPricePerMtok(econ.model)) /
+                1_000_000,
+            });
+            return send(200, { text });
+          },
+          (e: any) => send(500, { error: e?.message ?? String(e) })
+        );
+        return;
       }
       if (req.method === "GET" && p === "/api/compact-analysis") {
         const raw = parseInt(url.searchParams.get("days") || "30", 10);

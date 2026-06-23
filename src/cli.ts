@@ -516,6 +516,9 @@ function showHelp() {
     install-hooks --global     Install hooks in ~/.claude/settings.json (all projects)
     install-hooks --uninstall  Remove ClaudeLink hooks from the chosen scope
     reset                      Clear all messages and agent registrations
+    prompt-clear [--agent X]   Emit a paste-ready "your context is high" prompt
+                               with each live agent's current measured numbers
+                               interpolated. Pure stdout — no terminal write.
     help                       Show this help message
   `);
 }
@@ -756,6 +759,141 @@ function showStatus() {
   }
 }
 
+// Stage 1 — `claudelink prompt-clear [--agent <role>]`. Emits the operator's
+// standard "your context is high, want to clear/compact?" prompt to stdout
+// with each agent's current measured numbers interpolated. Pure shell-paste
+// convenience — no inject path, no terminal write, no /clear or /compact
+// fired. The operator copies the block into a terminal manually.
+//
+// Why this exists: per the architect panel (2026-06-22), ~60% of the
+// operator's friction in the manual flow is WATCHING many terminals, not
+// typing. Shipping this lets the operator skip the "open the terminal, read
+// the scrollback, type the prompt" loop while keeping the human checkpoint.
+async function promptClearCommand(targetRole: string | null): Promise<void> {
+  const dbPath = path.join(NEXUS_DIR, "nexus.db");
+  if (!fs.existsSync(dbPath)) {
+    console.log("  No ClaudeLink database found. Run 'claudelink init' first.");
+    return;
+  }
+  const Database = require("better-sqlite3");
+  const {
+    latestTurnEconomics,
+  } = await import("./context-watcher.js");
+  const {
+    modelContextWindow,
+    cacheReadPricePerMtok,
+    cwdForPid,
+    projectIdFromCwd,
+    PROJECTS_DIR,
+  } = await import("./usage-reader.js");
+  const { buildPromptClearText } = await import("./prompt-clear.js");
+
+  const db = new Database(dbPath, { readonly: true });
+  let agents: any[];
+  try {
+    agents = db
+      .prepare(
+        `SELECT id, role, pid, transcript_path
+           FROM agents
+          ORDER BY registered_at DESC`
+      )
+      .all();
+  } finally {
+    db.close();
+  }
+
+  const filtered = targetRole
+    ? agents.filter((a) => a.role === targetRole)
+    : agents;
+  if (filtered.length === 0) {
+    if (targetRole) {
+      console.log(`  No registered agent with role "${targetRole}".`);
+    } else {
+      console.log("  No registered agents.");
+    }
+    return;
+  }
+
+  const TRANSCRIPT_STALE_MS = 30 * 60 * 1000;
+  const findTranscript = (agent: {
+    pid: number;
+    transcript_path: string | null;
+  }): string | null => {
+    if (agent.transcript_path) {
+      try {
+        const st = fs.statSync(agent.transcript_path);
+        if (Date.now() - st.mtimeMs < TRANSCRIPT_STALE_MS) {
+          return agent.transcript_path;
+        }
+      } catch {
+        /* fall through to heuristic */
+      }
+    }
+    const cwd = cwdForPid(agent.pid);
+    if (!cwd) return null;
+    const dir = path.join(PROJECTS_DIR, projectIdFromCwd(cwd));
+    let files: { file: string; mtime: number }[];
+    try {
+      files = fs
+        .readdirSync(dir)
+        .filter((f) => f.endsWith(".jsonl"))
+        .map((f) => {
+          const full = path.join(dir, f);
+          return { file: full, mtime: fs.statSync(full).mtimeMs };
+        });
+    } catch {
+      return null;
+    }
+    if (files.length === 0) return null;
+    files.sort((a, b) => b.mtime - a.mtime);
+    return files[0].file;
+  };
+
+  let blocksEmitted = 0;
+  for (const agent of filtered) {
+    let alive = false;
+    try {
+      process.kill(agent.pid, 0);
+      alive = true;
+    } catch {
+      /* dead */
+    }
+    if (!alive) continue;
+
+    const transcript = findTranscript(agent);
+    if (!transcript) {
+      console.log(
+        `# Agent: ${agent.role} — no live session transcript found, skipping.`
+      );
+      continue;
+    }
+    const econ = await latestTurnEconomics(transcript);
+    if (!econ) {
+      console.log(
+        `# Agent: ${agent.role} — no usage data in transcript, skipping.`
+      );
+      continue;
+    }
+    const block = buildPromptClearText({
+      role: agent.role,
+      model: econ.model,
+      contextTokens: econ.contextTokens,
+      windowTokens: modelContextWindow(econ.model),
+      perTurnUsd:
+        (econ.contextTokens * cacheReadPricePerMtok(econ.model)) / 1_000_000,
+    });
+    if (blocksEmitted > 0) console.log("");
+    console.log(block);
+    blocksEmitted++;
+  }
+
+  if (blocksEmitted === 0 && targetRole) {
+    console.log(
+      `  No live session data for "${targetRole}" — the agent may be offline or its transcript has no usage records yet.`
+    );
+  }
+}
+
 function resetDB() {
   const dbPath = path.join(NEXUS_DIR, "nexus.db");
   if (fs.existsSync(dbPath)) {
@@ -822,6 +960,16 @@ switch (command) {
   case "reset":
     resetDB();
     break;
+  case "prompt-clear": {
+    const agentIdx = args.indexOf("--agent");
+    const role =
+      agentIdx >= 0 && agentIdx + 1 < args.length ? args[agentIdx + 1] : null;
+    promptClearCommand(role).catch((e: any) => {
+      console.error(`  prompt-clear failed: ${e?.message ?? String(e)}`);
+      process.exitCode = 1;
+    });
+    break;
+  }
   case "help":
   case "--help":
   case "-h":
