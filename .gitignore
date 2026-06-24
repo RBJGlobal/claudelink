@@ -9,3 +9,17 @@ dist/
 # Personal / founder-only docs (not part of the public repo)
 docs/founder-playbook.md
 
+# Internal-governance docs — process/IP that lives in private notes, NOT in
+# the public repo. Includes session handover, backlog state, internal
+# redesign docs, and any Command Center screenshots (which would show
+# internal agent role names).
+HANDOVER.md
+HANDOVER-*.md
+backlog-*.md
+docs/auto-compact-redesign-*.md
+docs/assets/
+
+# Per-run artifacts that name real agents — never publish.
+compact-analysis.json
+fleet-token-meter.png
+
