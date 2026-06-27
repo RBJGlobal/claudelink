@@ -17,6 +17,20 @@ export interface Agent {
   pane_id: string | null;
   last_seen_active_ts: number | null;
   autonomous_reply: number;
+  // v3: captured from the hook payload (session_id / transcript_path), so a
+  // registered agent can be mapped to its EXACT Claude Code session transcript
+  // — resolving per-agent attribution even when several agents share one repo
+  // dir. NULL until the agent's hook fires at least once (hooks must be installed).
+  session_id: string | null;
+  transcript_path: string | null;
+  // v4: agent-consented checkpoint signal (the SAFETY gate for auto-compact).
+  // The agent calls signal_checkpoint when it's at a real safe boundary; we
+  // store the moment + whether a full clear is safe + a pointer to its handoff.
+  // Instantaneous, not standing — freshness is judged from checkpoint_ts.
+  checkpoint_ts: number | null;
+  checkpoint_safe_to_clear: number;
+  checkpoint_handoff_path: string | null;
+  checkpoint_note: string | null;
 }
 
 export interface RegisterOptions {
@@ -52,7 +66,14 @@ export interface BulletinEntry {
 }
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
+// Production path. Tests set CLAUDELINK_DB_PATH so they don't share the
+// live fleet's DB. The constructor reads the env var at the time it runs,
+// so a test setting `process.env.CLAUDELINK_DB_PATH` before `new NexusDB()`
+// gets its own isolated DB file.
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
+function effectiveDbPath(): string {
+  return process.env.CLAUDELINK_DB_PATH || DB_PATH;
+}
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -67,11 +88,13 @@ export class NexusDB {
   private db: Database.Database;
 
   constructor() {
-    if (!fs.existsSync(NEXUS_DIR)) {
-      fs.mkdirSync(NEXUS_DIR, { recursive: true });
+    const dbPath = effectiveDbPath();
+    const dir = path.dirname(dbPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
     }
 
-    this.db = new Database(DB_PATH);
+    this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 5000");
 
@@ -149,6 +172,43 @@ export class NexusDB {
         `);
       });
       applyV2();
+    }
+
+    // v3 — session identity for exact agent->transcript mapping. Additive,
+    // nullable; populated from the hook payload (session_id / transcript_path).
+    // Rollback:
+    //   ALTER TABLE agents DROP COLUMN transcript_path;
+    //   ALTER TABLE agents DROP COLUMN session_id;
+    //   PRAGMA user_version = 2;
+    if (userVersion < 3) {
+      const applyV3 = this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE agents ADD COLUMN session_id TEXT;
+          ALTER TABLE agents ADD COLUMN transcript_path TEXT;
+          PRAGMA user_version = 3;
+        `);
+      });
+      applyV3();
+    }
+
+    // v4 — agent-consented checkpoint signal (auto-compact safety gate).
+    // Additive, nullable. Rollback:
+    //   ALTER TABLE agents DROP COLUMN checkpoint_note;
+    //   ALTER TABLE agents DROP COLUMN checkpoint_handoff_path;
+    //   ALTER TABLE agents DROP COLUMN checkpoint_safe_to_clear;
+    //   ALTER TABLE agents DROP COLUMN checkpoint_ts;
+    //   PRAGMA user_version = 3;
+    if (userVersion < 4) {
+      const applyV4 = this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE agents ADD COLUMN checkpoint_ts INTEGER;
+          ALTER TABLE agents ADD COLUMN checkpoint_safe_to_clear INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE agents ADD COLUMN checkpoint_handoff_path TEXT;
+          ALTER TABLE agents ADD COLUMN checkpoint_note TEXT;
+          PRAGMA user_version = 4;
+        `);
+      });
+      applyV4();
     }
   }
 
@@ -389,6 +449,62 @@ export class NexusDB {
     const r = this.db
       .prepare(`UPDATE agents SET autonomous_reply = ? WHERE id = ?`)
       .run(enabled ? 1 : 0, agentId);
+    return r.changes > 0;
+  }
+
+  // Record an agent-consented checkpoint signal (the auto-compact SAFETY gate).
+  // Always stamps a fresh timestamp — the signal is instantaneous, and the
+  // economic side judges freshness from checkpoint_ts. Returns false if no such
+  // agent.
+  setCheckpoint(
+    agentId: string,
+    opts: { safeToClear: boolean; handoffPath: string | null; note: string | null }
+  ): boolean {
+    const r = this.db
+      .prepare(
+        `UPDATE agents
+            SET checkpoint_ts = ?,
+                checkpoint_safe_to_clear = ?,
+                checkpoint_handoff_path = ?,
+                checkpoint_note = ?
+          WHERE id = ?`
+      )
+      .run(Date.now(), opts.safeToClear ? 1 : 0, opts.handoffPath ?? null, opts.note ?? null, agentId);
+    return r.changes > 0;
+  }
+
+  // Two-tier signal: refresh ONLY checkpoint_ts (the recency channel) without
+  // touching the consent-strength fields (safe_to_clear / handoff_path / note).
+  // Wired into the Stop hook so the watcher sees a fresh per-turn signal at
+  // every natural turn boundary — without the agent having to remember to call
+  // signal_checkpoint manually. The Stop-hook freshness gates the lossless
+  // /compact path; the explicit signal_checkpoint(safe_to_clear=true) stays as
+  // the stronger consent for the future destructive /clear path.
+  touchCheckpoint(agentId: string): boolean {
+    const r = this.db
+      .prepare(`UPDATE agents SET checkpoint_ts = ? WHERE id = ?`)
+      .run(Date.now(), agentId);
+    return r.changes > 0;
+  }
+
+  // Stamp the agent's Claude Code session identity, captured from a hook
+  // payload. Idempotent: only writes when a value actually changes, so the
+  // common case (same session firing the hook repeatedly) is a cheap no-op.
+  setAgentSession(
+    agentId: string,
+    sessionId: string | null,
+    transcriptPath: string | null
+  ): boolean {
+    const row = this.db
+      .prepare(`SELECT session_id, transcript_path FROM agents WHERE id = ?`)
+      .get(agentId) as { session_id: string | null; transcript_path: string | null } | undefined;
+    if (!row) return false;
+    if (row.session_id === (sessionId ?? null) && row.transcript_path === (transcriptPath ?? null)) {
+      return false; // unchanged — skip the write
+    }
+    const r = this.db
+      .prepare(`UPDATE agents SET session_id = ?, transcript_path = ? WHERE id = ?`)
+      .run(sessionId ?? null, transcriptPath ?? null, agentId);
     return r.changes > 0;
   }
 

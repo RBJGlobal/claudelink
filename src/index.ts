@@ -6,12 +6,36 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { execSync, execFileSync } from "child_process";
+import fs from "fs";
+import path from "path";
+import os from "os";
 import { NexusDB } from "./db.js";
 import { launchUIIfNeeded } from "./ui-launcher.js";
+import {
+  HANDOFF_DIR,
+  isHandoffPathSafe,
+  verifyHandoff,
+} from "./compact-executor.js";
 
 const db = new NexusDB();
 let currentAgentId: string | null = null;
 let currentRole: string | null = null;
+// Heartbeat interval handle. Held at module level so a re-register clears
+// the prior interval instead of accumulating one per call, and so the
+// shutdown handlers below can cancel it cleanly. `.unref()` keeps the
+// process exit from being delayed by the timer.
+let heartbeatHandle: NodeJS.Timeout | null = null;
+
+// Observe-only audit log for agent-consented checkpoint signals. The auto-
+// compact safety gate: agents emit, ClaudeLink records, NOTHING auto-fires.
+const CHECKPOINT_LOG = path.join(os.homedir(), ".claudelink", "checkpoint.log");
+function appendCheckpointLog(line: string): void {
+  try {
+    fs.appendFileSync(CHECKPOINT_LOG, `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    /* logging never breaks a tool call */
+  }
+}
 
 // Auto-detect the controlling TTY of the parent process (Claude Code itself).
 // The MCP server's own stdin/stdout are pipes (JSON-RPC), so process.stdout.isTTY
@@ -88,9 +112,25 @@ function detectPaneId(): string | null {
   );
 }
 
+// Self-conveying behavioral protocol surfaced to every connecting agent via the
+// MCP `initialize` instructions field (Claude Code injects this into the model's
+// context automatically — no per-terminal CLAUDE.md edit). Kept well under the
+// 2KB Claude Code truncates server instructions at, critical detail first.
+// Single global source: every agent reads this identical text on connect.
+const CHECKPOINT_INSTRUCTIONS = `ClaudeLink — context checkpoint protocol. Each turn pays to re-read your full context, and an uncontrolled auto-compact can lose hours of work. ClaudeLink watches your context size and can run an autonomous /compact at a moment you've declared safe. Calling signal_checkpoint is how you opt into this protection.
+
+WHEN TO CALL: at every natural rest point — after a discrete piece of work, at end-of-turn with nothing in flight, after summarizing to a handoff or memory file, or any time it's been many turns since your last call. The signal is fresh each call; call often. You decide WHEN it is safe; ClaudeLink decides WHETHER to compact (gates on size, economics, signal age, idle, ambiguity). A compact never lands mid-work — the gate refuses if anything looks in-flight.
+
+PARAMS {safe_to_clear, handoff_path, note}:
+- safe_to_clear=true only if your handoff has everything needed to resume AND nothing live still matters. When false, your call still updates the freshness signal — valuable on its own.
+- handoff_path: file to resume from (optional).
+- note: one-line label, e.g. "finished auth refactor, tests green".
+
+If your role is on the armed allowlist, your call may trigger a real /compact. If not, ClaudeLink records for calibration. Either way, calling is how the system gets safer.`;
+
 const server = new Server(
   { name: "ClaudeLink", version: "1.0.0" },
-  { capabilities: { tools: {} } }
+  { capabilities: { tools: {} }, instructions: CHECKPOINT_INSTRUCTIONS }
 );
 
 function requireRegistration(): string {
@@ -225,6 +265,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: "signal_checkpoint",
+      description:
+        "Call at every natural rest point — after a discrete piece of work, at end-of-turn with nothing in flight, after summarizing to a handoff/memory file, or whenever it's been many turns since your last call. The signal is fresh each call (not a standing flag); call often. You decide WHEN it is safe; ClaudeLink decides WHETHER to compact based on size, economics, signal age, idle state, and handoff verification — a compact never lands mid-work because the gate refuses if anything looks in-flight. If your role is on the armed allowlist, your call may trigger an autonomous /compact when all gates are green. If your role is not on the allowlist, the call is recorded for calibration only. Either way, calling is how the system gets safer.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          safe_to_clear: {
+            type: "boolean",
+            description:
+              "true if a FULL CLEAR is safe (handoff has everything needed to resume AND nothing live still matters); false if a summarizing /compact would be safer. Today the armed inject path is /compact only — safe_to_clear is reserved for the future /clear path; calls with safe_to_clear=false still update the freshness signal and are valuable on their own.",
+          },
+          handoff_path: {
+            type: "string",
+            description:
+              "OPTIONAL — path to your handoff/resume-state file. Must resolve under ~/.claudelink/handoffs/ (paths outside that directory are rejected at this call, so use handoffPathFor() if you have it). Required ONLY for safe_to_clear=true to be honored; otherwise the call still records freshness.",
+          },
+          note: {
+            type: "string",
+            description:
+              "Optional short label, e.g. \"finished auth refactor, tests green\".",
+          },
+        },
+        required: ["safe_to_clear"],
+      },
+    },
   ],
 }));
 
@@ -249,8 +315,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         currentRole = role;
 
-        // Heartbeat every 30 seconds
-        setInterval(() => {
+        // Heartbeat every 30 seconds. Clear any prior interval first so a
+        // re-register in the same process doesn't accumulate timers.
+        if (heartbeatHandle) clearInterval(heartbeatHandle);
+        heartbeatHandle = setInterval(() => {
           if (currentAgentId) {
             try {
               db.heartbeat(currentAgentId);
@@ -259,6 +327,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }
         }, 30000);
+        heartbeatHandle.unref();
 
         const agents = db.getAgents();
         const otherAgents = agents.filter((a) => a.id !== currentAgentId);
@@ -397,6 +466,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: "text", text: response }] };
       }
 
+      case "signal_checkpoint": {
+        const agentId = requireRegistration();
+        const safeToClear = Boolean(args?.safe_to_clear);
+        const rawHandoffPath = (args?.handoff_path as string) || null;
+        const note = (args?.note as string) || null;
+
+        // Path safety: agent-controlled `handoff_path` must resolve under
+        // ~/.claudelink/handoffs/ (HANDOFF_DIR). Without this an agent could
+        // call with handoff_path="/etc/passwd" or any large file on disk and
+        // the downstream verifyHandoff size-check would pass — the watcher
+        // would observe handoffOk=true on a file the agent didn't write.
+        // Reject at ingress and surface the failure to the agent so they can
+        // correct it (vs the silent-skip path the watcher would take later).
+        let pathFeedback = "";
+        let handoffPath: string | null = rawHandoffPath;
+        if (rawHandoffPath && !isHandoffPathSafe(rawHandoffPath)) {
+          handoffPath = null;
+          pathFeedback =
+            ` (NOTE: handoff_path "${rawHandoffPath}" was rejected — it must resolve under ${HANDOFF_DIR}. ` +
+            `Saved checkpoint with no handoff; safe_to_clear effectively false until you provide a path under that directory.)`;
+        } else if (rawHandoffPath && safeToClear) {
+          // Validate content too: byte-count alone is bypassable since the
+          // template itself is ~270 bytes. If the agent set safe_to_clear=true
+          // with a path, the handoff must actually exist and be filled in,
+          // else the gate will silently refuse later — give the agent feedback
+          // now.
+          const v = verifyHandoff(rawHandoffPath);
+          if (!v.ok) {
+            pathFeedback =
+              ` (NOTE: handoff at ${rawHandoffPath} is ${v.bytes} bytes and missing required content — ` +
+              `safe_to_clear=true checkpoints need the file to be filled in past the template stub. ` +
+              `Checkpoint recorded for freshness; will not satisfy the safety gate until the handoff is filled.)`;
+          }
+        }
+
+        db.setCheckpoint(agentId, { safeToClear, handoffPath, note });
+        appendCheckpointLog(
+          `signal role=${currentRole ?? "?"} agent=${agentId.slice(0, 8)} ` +
+            `safe_to_clear=${safeToClear} handoff=${handoffPath ?? "-"} ` +
+            `raw_handoff=${rawHandoffPath ?? "-"} note=${JSON.stringify(note ?? "")}` +
+            (pathFeedback ? ` rejected=true` : "")
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "Checkpoint recorded. ClaudeLink weighs this safe-signal against measured context cost; for roles on the armed allowlist a real /compact may follow when the size + economic + idle + handoff gates all pass. Off-allowlist roles are recorded for calibration only." +
+                pathFeedback,
+            },
+          ],
+        };
+      }
+
       default:
         return {
           content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -425,6 +548,21 @@ async function main() {
     })
     .catch(() => {});
 }
+
+// Shutdown cleanup: clear the heartbeat interval on signal so the timer
+// doesn't survive into the (very short) window before Node exits. .unref()
+// already covers process-exit blocking; this is belt-and-braces and also
+// catches the case where the parent process detaches but the MCP server is
+// being kept alive by something else.
+function shutdown(): void {
+  if (heartbeatHandle) {
+    clearInterval(heartbeatHandle);
+    heartbeatHandle = null;
+  }
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+process.on("exit", shutdown);
 
 main().catch((err) => {
   console.error("Failed to start ClaudeLink:", err);

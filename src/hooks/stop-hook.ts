@@ -5,7 +5,14 @@
 //   2. Look up which ClaudeLink agent registered for that TTY.
 //   3. Atomically read+mark-read the agent's inbox.
 //   4. Stamp last_seen_active_ts so Path B's idle detector has fresh data.
-//   5. Apply guards in this order, log every decision to auto-fire.log:
+//   5. Touch checkpoint_ts so the context-watcher sees a fresh per-turn safe
+//      signal at every natural turn boundary. Two-tier semantic: this is the
+//      AUTOMATIC freshness signal for the lossless /compact path. The
+//      stronger signal_checkpoint(safe_to_clear=true) MCP call remains the
+//      explicit consent reserved for the future destructive /clear path.
+//      End-of-turn is by definition a safe instant (no mid-tool-use), so this
+//      can run deterministically without the agent having to remember.
+//   6. Apply guards in this order, log every decision to auto-fire.log:
 //        a. No agent registered for this TTY → silent exit.
 //        b. autonomous_reply == 0          → print messages to stderr, exit 0.
 //        c. No messages with expects_reply  → exit 0.
@@ -121,6 +128,28 @@ function main(): number {
     }
 
     db.updateLastSeenActive(agent.id);
+
+    // Two-tier checkpoint freshness: refresh the recency channel at every
+    // turn boundary. Wrapped so a failure here can never affect the inbox-
+    // reply path below. Does NOT set safe_to_clear / handoff_path / note —
+    // those remain owned by the explicit signal_checkpoint MCP call.
+    try {
+      db.touchCheckpoint(agent.id);
+    } catch {
+      // best-effort; never break the hook
+    }
+
+    // v3: capture this agent's session identity from the hook payload so it can
+    // be mapped to its EXACT transcript (resolving per-agent attribution in
+    // shared repo dirs). Idempotent — only writes when it changes. Wrapped so a
+    // capture failure can never affect the hook's auto-fire decision.
+    if (payload.session_id || payload.transcript_path) {
+      try {
+        db.setAgentSession(agent.id, payload.session_id ?? null, payload.transcript_path ?? null);
+      } catch {
+        // best-effort metadata; never break the hook
+      }
+    }
 
     if (agent.autonomous_reply === 0) {
       // Advisor pattern: never block-and-continue. We DO consume the inbox

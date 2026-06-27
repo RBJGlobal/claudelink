@@ -1,6 +1,8 @@
 # ClaudeLink - Project Instructions
 
 > **Resuming work?** Read `HANDOVER.md` first — it captures the last session's status and what to test next.
+>
+> **Internal docs are offsite-backed-up at `RBJGlobal/claudelink-internal` (private repo, sibling working dir `~/Projects/Tools/claudelink-internal/`).** Any session that edits `HANDOVER.md`, `backlog-*.md`, `docs/founder-playbook.md`, `docs/auto-compact-redesign-*.md`, `compact-analysis.json`, `fleet-token-meter.png`, or `docs/assets/*` must mirror the change into that working dir and `git push` — this public repo's `.gitignore` blocks them by design.
 
 ## Model selection policy
 

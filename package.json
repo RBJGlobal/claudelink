@@ -13,7 +13,11 @@
   "scripts": {
     "build": "tsc",
     "prepare": "npm run build",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "tsx --test test/*.test.ts",
+    "test:watch": "tsx --test --watch test/*.test.ts",
+    "test:e2e": "playwright test test/e2e",
+    "test:all": "npm test && npm run test:e2e"
   },
   "files": [
     "dist",
@@ -51,8 +55,10 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^20.11.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.3.0"
   }
 }
