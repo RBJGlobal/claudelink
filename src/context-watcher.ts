@@ -728,19 +728,29 @@ export function startContextWatcher(): ContextWatcherHandle {
             });
             continue;
           }
-          // Then the SAFETY stack — and note compaction wants the agent IDLE,
-          // the opposite of the nudge path. ALL must hold before we type into a
-          // live terminal:
-          //   - fresh consent: agent signaled a checkpoint within K real turns
-          //     (it hasn't worked far past the handoff it wrote);
+          // Then the SAFETY stack — compaction wants the agent IDLE, the
+          // opposite of the nudge path. For the lossless /compact action the
+          // gates that MUST hold before we type into a live terminal are:
+          //   - fresh consent: a checkpoint signal landed within K real turns.
+          //     The Stop hook now touches checkpoint_ts at every turn boundary,
+          //     so for agents with the hook installed this is automatically
+          //     true at the natural turn end (the only safe instant to inject);
           //   - idle: last turn ENDED + quiet (not mid-turn / mid-tool-call);
-          //   - handoff verified non-trivial;
           //   - NOT an ambiguous shared-repo session (can't safely target it).
+          //
+          // handoff_ok (a verified handoff file pointer) is STILL computed +
+          // logged for visibility, but it is NOT a gate for /compact. Reason:
+          // /compact is soft-recoverable — it summarizes the context in place
+          // and the agent stays alive on the same transcript; the idle gate
+          // already prevents mid-tool-call interruption, so there is nothing
+          // to "resume from" a separate handoff file. handoff_ok stays as the
+          // stronger gate reserved for the future destructive /clear path,
+          // where the agent's state would actually be discarded.
           const ag = await armGate(session.file, a.checkpoint_ts);
           const freshConsent =
             a.checkpoint_ts != null && ag.turnsSinceSignal <= MAX_TURNS_SINCE_SIGNAL;
           const handoffOk = !!a.checkpoint_handoff_path && verifyHandoff(a.checkpoint_handoff_path).ok;
-          if (!(ag.idle && freshConsent && handoffOk && !session.ambiguous)) {
+          if (!(ag.idle && freshConsent && !session.ambiguous)) {
             logGateStatus({
               ...(commonFields as GateStatusFields),
               decision: "inject-skip-safety",

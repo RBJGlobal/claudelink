@@ -146,6 +146,50 @@ test("setCheckpoint with null handoff and safeToClear=false stores correctly", (
   assert.equal(row.checkpoint_note, null);
 });
 
+test("touchCheckpoint refreshes ts WITHOUT clearing safe_to_clear/handoff/note", () => {
+  const db = freshDb();
+  const id = db.registerAgent("touch-agent", null, process.pid, {
+    tty: null,
+    terminalApp: null,
+    paneId: null,
+    autonomousReply: true,
+  });
+  // Pre-seed a full setCheckpoint as if the agent had previously called
+  // signal_checkpoint(safe_to_clear=true, handoff="/x/foo.md", note="ready").
+  db.setCheckpoint(id, {
+    safeToClear: true,
+    handoffPath: "/Users/test/.claudelink/handoffs/" + id + ".md",
+    note: "ready",
+  });
+  const sqlite = new Database(TMP_DB, { readonly: true });
+  const before = sqlite
+    .prepare(
+      `SELECT checkpoint_ts, checkpoint_safe_to_clear, checkpoint_handoff_path, checkpoint_note FROM agents WHERE id = ?`
+    )
+    .get(id) as any;
+  sqlite.close();
+
+  // 10ms gap so we can prove ts moved forward.
+  const sleepUntil = Date.now() + 10;
+  while (Date.now() < sleepUntil) {
+    /* spin */
+  }
+  db.touchCheckpoint(id);
+
+  const sqlite2 = new Database(TMP_DB, { readonly: true });
+  const after = sqlite2
+    .prepare(
+      `SELECT checkpoint_ts, checkpoint_safe_to_clear, checkpoint_handoff_path, checkpoint_note FROM agents WHERE id = ?`
+    )
+    .get(id) as any;
+  sqlite2.close();
+
+  assert.ok(after.checkpoint_ts > before.checkpoint_ts, "ts advanced");
+  assert.equal(after.checkpoint_safe_to_clear, 1, "safe_to_clear preserved");
+  assert.equal(after.checkpoint_handoff_path, before.checkpoint_handoff_path, "handoff preserved");
+  assert.equal(after.checkpoint_note, "ready", "note preserved");
+});
+
 test("setAgentSession stores session_id + transcript_path (v3)", () => {
   const db = freshDb();
   const id = db.registerAgent("sess-agent", null, process.pid, {

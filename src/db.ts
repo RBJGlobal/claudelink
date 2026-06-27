@@ -473,6 +473,20 @@ export class NexusDB {
     return r.changes > 0;
   }
 
+  // Two-tier signal: refresh ONLY checkpoint_ts (the recency channel) without
+  // touching the consent-strength fields (safe_to_clear / handoff_path / note).
+  // Wired into the Stop hook so the watcher sees a fresh per-turn signal at
+  // every natural turn boundary — without the agent having to remember to call
+  // signal_checkpoint manually. The Stop-hook freshness gates the lossless
+  // /compact path; the explicit signal_checkpoint(safe_to_clear=true) stays as
+  // the stronger consent for the future destructive /clear path.
+  touchCheckpoint(agentId: string): boolean {
+    const r = this.db
+      .prepare(`UPDATE agents SET checkpoint_ts = ? WHERE id = ?`)
+      .run(Date.now(), agentId);
+    return r.changes > 0;
+  }
+
   // Stamp the agent's Claude Code session identity, captured from a hook
   // payload. Idempotent: only writes when a value actually changes, so the
   // common case (same session firing the hook repeatedly) is a cheap no-op.
