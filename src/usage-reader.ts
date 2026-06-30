@@ -204,6 +204,21 @@ export function modelContextWindow(model: string): number {
   return 200_000;
 }
 
+// The window to divide observed context by. The model ID alone is not enough:
+// the 1M-context beta is a request HEADER, so Claude Code records the model as
+// plain "claude-opus-4-8" even when it's running on a 1M window — modelContextWindow
+// then defaults to 200K and occupancy reads >100% (e.g. a real 572K turn shows 286%).
+//
+// We infer from evidence instead: if a turn's input-side tokens EXCEED 200K, the
+// API accepted a request a 200K model would have rejected, so that session is
+// provably on a >200K (i.e. 1M) window. Below 200K the label is unchanged —
+// correct for a 200K model, harmless for a 1M one — so this only corrects the
+// misleading >100% case. Self-correcting, no config, no transcript internals.
+export function effectiveContextWindow(model: string, contextTokens: number): number {
+  if (contextTokens > 200_000) return 1_000_000;
+  return modelContextWindow(model);
+}
+
 function localDate(ts: number): string {
   const d = new Date(ts);
   const y = d.getFullYear();

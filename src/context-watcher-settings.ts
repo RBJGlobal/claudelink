@@ -57,6 +57,13 @@ export interface ContextWatcherSettings {
   compactBaselineTokens: number; // assumed post-compact size, for projection
   cooldownMin: number; // min gap between nudges to the same session
   message: string;
+  // T1 CONSENT HANDSHAKE. Instead of silently auto-firing `message` (/compact)
+  // the moment an allowlisted agent is idle, the armed path first types
+  // `askMessage` to ask the agent to flush its handoff and consent via
+  // signal_checkpoint(safe_to_clear=true). `/compact` only fires once a genuine
+  // consent is on record and still fresh (within consentFreshMin).
+  askMessage: string;
+  consentFreshMin: number; // how long an agent's safe_to_clear=true stays fire-eligible
   // Role allowlist for ARMED inject (the "controlled subset"). FAIL-CLOSED:
   // an empty/unset list fires on NO ONE. Only roles explicitly listed here are
   // ever auto-compacted, regardless of all the other gates. This is what makes
@@ -84,6 +91,9 @@ const DEFAULTS: ContextWatcherSettings = {
   compactBaselineTokens: 60000,
   cooldownMin: 30,
   message: "/compact",
+  askMessage:
+    "Context check (automated): you're at high context occupancy and currently idle. If this is a good moment to /compact, FIRST update your HANDOVER.md / artifacts so nothing is lost, THEN call signal_checkpoint with safe_to_clear=true and your handoff_path to consent — I'll /compact you on the next check. If you're mid-something-heavy, call signal_checkpoint with safe_to_clear=false and a one-line note and I'll hold off.",
+  consentFreshMin: 15,
   injectAllowlist: [], // fail-closed: empty = arm nobody
   oneShot: true,
   activeSince: null,
@@ -150,6 +160,11 @@ export function readContextWatcherSettings(): ContextWatcherSettings {
         typeof parsed.message === "string" && parsed.message.length > 0
           ? parsed.message
           : DEFAULTS.message,
+      askMessage:
+        typeof parsed.askMessage === "string" && parsed.askMessage.length > 0
+          ? parsed.askMessage
+          : DEFAULTS.askMessage,
+      consentFreshMin: clampInt(Number(parsed.consentFreshMin), 1, 120, DEFAULTS.consentFreshMin),
       injectAllowlist: cleanAllowlist(parsed.injectAllowlist),
       oneShot: parsed.oneShot === undefined ? DEFAULTS.oneShot : Boolean(parsed.oneShot),
       activeSince:
@@ -210,6 +225,14 @@ export function writeContextWatcherSettings(
       partial.message !== undefined && typeof partial.message === "string" && partial.message.length > 0
         ? partial.message
         : current.message,
+    askMessage:
+      partial.askMessage !== undefined && typeof partial.askMessage === "string" && partial.askMessage.length > 0
+        ? partial.askMessage
+        : current.askMessage,
+    consentFreshMin:
+      partial.consentFreshMin !== undefined
+        ? clampInt(Number(partial.consentFreshMin), 1, 120, current.consentFreshMin)
+        : current.consentFreshMin,
     injectAllowlist: partial.injectAllowlist !== undefined ? cleanAllowlist(partial.injectAllowlist) : current.injectAllowlist,
     oneShot: partial.oneShot !== undefined ? Boolean(partial.oneShot) : current.oneShot,
     activeSince:

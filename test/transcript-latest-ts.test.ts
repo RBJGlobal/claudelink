@@ -212,4 +212,20 @@ test("armGate returns no-turns for an empty transcript", async () => {
   const ag = await armGate(f, null);
   assert.equal(ag.idle, false);
   assert.equal(ag.turnsSinceSignal, 999);
+  assert.equal(ag.latestType, "none");
+});
+
+test("armGate exposes latestType/ageSec for a user-latest (parked) transcript — the manual override's relaxed-idle signal", async () => {
+  // A terminal parked after a local command: the chronologically-latest turn is
+  // a `user` entry with no assistant reply. Strict idle stays false (only an
+  // assistant turn flips it), but the manual override needs latestType + ageSec
+  // to recognize it as parked-not-busy.
+  const f = writeTranscript("parked-user", [
+    assistantTurn({ secondsAgo: 1800, contextTokens: 200_000, stop: "end_turn", toolUse: false }),
+    userTurn(600), // newest turn is a user message, 10 min old, no assistant after it
+  ]);
+  const ag = await armGate(f, null);
+  assert.equal(ag.idle, false, "strict idle never flips on a user-latest turn");
+  assert.equal(ag.latestType, "user");
+  assert.ok(ag.ageSec >= 120, "parked well past the manual threshold");
 });

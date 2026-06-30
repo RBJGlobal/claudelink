@@ -780,7 +780,7 @@ async function promptClearCommand(targetRole: string | null): Promise<void> {
     latestTurnEconomics,
   } = await import("./context-watcher.js");
   const {
-    modelContextWindow,
+    effectiveContextWindow,
     cacheReadPricePerMtok,
     cwdForPid,
     projectIdFromCwd,
@@ -814,19 +814,23 @@ async function promptClearCommand(targetRole: string | null): Promise<void> {
     return;
   }
 
-  const TRANSCRIPT_STALE_MS = 30 * 60 * 1000;
+  // DISPLAY/OBSERVATION resolver (read-only, feeds prompt-clear/status). Same rule
+  // as the dashboard's findFleetTranscript: trust the agent's own transcript_path
+  // whenever the file exists, even if stale — a stale own-transcript is the
+  // terminal's real last size (idle), whereas the dir-heuristic fallback would
+  // misattribute another agent's session in a shared repo. Heuristic only when
+  // there's no own path or the file is gone. (Injection targeting keeps the
+  // staleness guard in resolveSession — not this read-only path.)
   const findTranscript = (agent: {
     pid: number;
     transcript_path: string | null;
   }): string | null => {
     if (agent.transcript_path) {
       try {
-        const st = fs.statSync(agent.transcript_path);
-        if (Date.now() - st.mtimeMs < TRANSCRIPT_STALE_MS) {
-          return agent.transcript_path;
-        }
+        fs.statSync(agent.transcript_path); // exists → this agent's own session
+        return agent.transcript_path;
       } catch {
-        /* fall through to heuristic */
+        /* missing/unreadable → fall through to heuristic */
       }
     }
     const cwd = cwdForPid(agent.pid);
@@ -878,7 +882,7 @@ async function promptClearCommand(targetRole: string | null): Promise<void> {
       role: agent.role,
       model: econ.model,
       contextTokens: econ.contextTokens,
-      windowTokens: modelContextWindow(econ.model),
+      windowTokens: effectiveContextWindow(econ.model, econ.contextTokens),
       perTurnUsd:
         (econ.contextTokens * cacheReadPricePerMtok(econ.model)) / 1_000_000,
     });
