@@ -10,6 +10,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { NexusDB } from "./db.js";
+import { roleCollisionWarning, fanoutNotice } from "./role-collision.js";
 import { launchUIIfNeeded } from "./ui-launcher.js";
 import {
   HANDOFF_DIR,
@@ -333,6 +334,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const otherAgents = agents.filter((a) => a.id !== currentAgentId);
 
         let response = `Registered as "${role}" (ID: ${currentAgentId.slice(0, 8)}...)`;
+        // #2 — warn if this role already has a live holder: a directed send to a
+        // shared role fans out to all of them (see role-collision.ts).
+        const roleSiblings = otherAgents.filter((a) => a.role === role && a.alive);
+        const collision = roleCollisionWarning(role, roleSiblings);
+        if (collision) response += `\n\n${collision}`;
         if (otherAgents.length > 0) {
           response += `\n\nOther active agents:\n`;
           for (const a of otherAgents) {
@@ -355,19 +361,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const parentMessageId =
           typeof args?.parentMessageId === "number" ? args.parentMessageId : null;
 
-        const count = db.sendMessage(agentId, to, message, priority, {
+        const recipients = db.sendMessage(agentId, to, message, priority, {
           expectsReply,
           parentMessageId,
         });
         const fyi = expectsReply ? "" : " [FYI, no reply expected]";
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Message sent to ${count} agent(s) with role "${to}" [priority: ${priority}]${fyi}`,
-            },
-          ],
-        };
+        let text = `Message sent to ${recipients.length} agent(s) with role "${to}" [priority: ${priority}]${fyi}`;
+        // #3 — make a multi-match fan-out visible to the sender instead of silent.
+        const notice = fanoutNotice(to, recipients);
+        if (notice) text += `\n\n${notice}`;
+        return { content: [{ type: "text", text }] };
       }
 
       case "broadcast": {

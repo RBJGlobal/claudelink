@@ -332,6 +332,7 @@ The Command Center is a local web UI at `http://127.0.0.1:7878` — a live conso
 | **Health** | Total agents, unread/total messages, bulletin entries, orphan blockers, FK violations. **Heal orphans** cleans dead-agent tail rows in one transaction. |
 | **Auto-nudge** | Global on/off + tick interval (1–120 min). Scheduler only fires for terminals that *actually have* unread mail — no wasted Claude turns. |
 | **Recovery Watcher** *(v1.4.0+)* | Detects Anthropic API rate-limit / overload errors in agent terminals and types a recovery prompt automatically. Configurable poll interval, cooldown, and escalate-to-desktop-notification threshold. See [Recovery Watcher](#3-recovery-watcher-api-error-auto-recovery) below. |
+| **Fleet — live context** *(v1.5.0+)* | Per-agent context occupancy, $/turn, handoff freshness and last-signal age, sorted most-urgent-first. Per-row **Copy prompt**, **Compact**, and **Clear** — an on-demand, consent-gated handshake to act on a heavy terminal. See [Fleet live context](#fleet-live-context--on-demand-compaction-v150) below. |
 | **Recent messages** | Live feed of the last several messages across all agents, with priority and unread badges. |
 
 The page auto-refreshes every 2 seconds. **Kill all servers** in the header drops the entire mesh in one click.
@@ -349,6 +350,34 @@ claudelink ui --stop   # graceful shutdown
 
 ---
 
+## Fleet live context & on-demand compaction *(v1.5.0)*
+
+Long-running agents fill their context window. Every turn then pays to re-read that full context, and an uncontrolled auto-compact can wipe hours of in-flight reasoning at the worst possible moment. The **Fleet — live context** panel turns that invisible cost into something you can see and act on — without ever interrupting an agent mid-thought.
+
+### See it
+
+Each alive agent gets a row read live from its own session transcript:
+
+- **Context occupancy** — input-side tokens vs. the model's real window, as a bar + percentage, sorted most-urgent-first. Models running on a **1M-context window** are detected from observed usage and scaled correctly (no more false "180%").
+- **$/turn** — what re-sending that context costs at the agent's model price, so "this terminal is expensive" stops being a guess.
+- **Handoff freshness** — whether the agent has a recent, verified handoff file on record.
+- **Last signal** — how long since the agent last checked in.
+
+The numbers are **per-agent and never cross-attributed**, even when several agents share one repository.
+
+### Act on it — a consent handshake, not a kill switch
+
+The catch with "just compact the heavy one" is that compacting at the wrong instant loses work. ClaudeLink never fires blind. Both the automatic threshold and the manual **Compact** / **Clear** buttons run the **same consent handshake**:
+
+1. **Ask** — when a terminal is high + idle, ClaudeLink types a prompt asking the agent to flush its `HANDOVER.md`/artifacts, then call `signal_checkpoint(safe_to_clear=true, handoff_path=…)`.
+2. **Fire** — only once the agent **genuinely consents** (a fresh checkpoint that *postdates* the request) **and** is re-confirmed idle does ClaudeLink type `/compact`. **Clear** additionally refuses to fire without a verified handoff (it's a full wipe).
+
+Nothing fires mid-work, and nothing fires without a yes. The **Compact** / **Clear** buttons just start that same handshake on demand instead of at the occupancy threshold — your click authorizes it, so the allowlist/economics gates are skipped, but the idle + consent + handoff safety gates stay. **Copy prompt** copies the operator's standard "your context is high, ready to clear/compact?" message with that agent's live numbers filled in, for you to paste by hand.
+
+Agents opt into the protection by calling `signal_checkpoint` at natural rest points — *you* decide when it's safe, ClaudeLink decides whether to compact (it gates on size, economics, signal age, idle state, and handoff verification). Keystroke dispatch works for **tmux** and **iTerm2**.
+
+---
+
 ## Available tools
 
 Once connected, every agent session — Claude Code, Codex CLI, Gemini CLI, Goose, or any other MCP client — gains these MCP tools:
@@ -362,8 +391,9 @@ Once connected, every agent session — Claude Code, Codex CLI, Gemini CLI, Goos
 | `get_agents` | Roster of who's online | *"Who's online?"* |
 | `post_bulletin` | Persistent announcement | *"Post to bulletin: v2.1 release branch created"* |
 | `get_bulletin` | Read the bulletin board | *"Show the bulletin board"* |
+| `signal_checkpoint` *(v1.5.0+)* | Declare a safe-to-compact rest point | *"I've flushed my handover — signal a checkpoint, safe to clear"* |
 
-`register` and `send` accept v1.1 options: `autonomousReply`, `expectsReply`, `parentMessageId` for thread tracking, FYI semantics, and per-agent autonomy control.
+`register` and `send` accept v1.1 options: `autonomousReply`, `expectsReply`, `parentMessageId` for thread tracking, FYI semantics, and per-agent autonomy control. `signal_checkpoint` (`safe_to_clear`, `handoff_path`, `note`) lets an agent mark a moment where its context can be safely compacted — the input to the [Fleet live context](#fleet-live-context--on-demand-compaction-v150) protocol below.
 
 ---
 

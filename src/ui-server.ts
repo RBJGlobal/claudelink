@@ -29,7 +29,7 @@ import {
 } from "./context-watcher-settings.js";
 import { analyzeCompactEvents } from "./compact-analyzer.js";
 import {
-  modelContextWindow,
+  effectiveContextWindow,
   cacheReadPricePerMtok,
   cwdForPid,
   projectIdFromCwd,
@@ -149,22 +149,31 @@ function isClaudelinkServerPid(pid: number): boolean {
   }
 }
 
-// Resolve the live transcript for an alive agent. Reuses the watcher's
-// recency check (stale captured paths fall back to most-recent-in-project-dir
-// rather than scoring the dashboard against a dead transcript).
-const FLEET_TRANSCRIPT_STALE_MS = 30 * 60 * 1000;
-function findFleetTranscript(opts: {
+// Resolve the live transcript for an alive agent — DISPLAY/OBSERVATION path
+// (read-only). Trust the agent's own captured transcript_path whenever the file
+// EXISTS, even if its mtime is stale: a stale own-transcript shows the terminal's
+// real last context size (unchanged precisely because it's idle), which is
+// CORRECT. We deliberately do NOT apply the watcher's mtime-staleness fallback
+// here — in a shared project dir (several agents in one repo) "most-recent .jsonl"
+// is usually ANOTHER agent's session, so the fallback misattributes that agent's
+// context (e.g. several idle terminals in a shared repo all showing one peer's
+// large 572K session instead of their own). The
+// staleness guard belongs only to the INJECTION path (resolveSession), where
+// targeting a wrong live session is a write hazard; observation has no such risk.
+// Fall back to the dir-heuristic ONLY when there is no own path (pre-v3 agent) or
+// the file is gone. (Edge: a session that rotates without re-registering shows a
+// stale own number until it re-registers — rarer and far less harmful than a
+// cross-agent number, and /compact does not rotate the transcript file.)
+export function findFleetTranscript(opts: {
   pid: number;
   transcript_path: string | null;
 }): string | null {
   if (opts.transcript_path) {
     try {
-      const st = fs.statSync(opts.transcript_path);
-      if (Date.now() - st.mtimeMs < FLEET_TRANSCRIPT_STALE_MS) {
-        return opts.transcript_path;
-      }
+      fs.statSync(opts.transcript_path); // exists + readable → it's this agent's session
+      return opts.transcript_path;
     } catch {
-      /* fall through to heuristic */
+      /* missing/unreadable → fall through to heuristic */
     }
   }
   const cwd = cwdForPid(opts.pid);
@@ -224,7 +233,7 @@ async function enrichAgentsFleet(
         econ = null;
       }
       if (!econ) return;
-      const window = modelContextWindow(econ.model);
+      const window = effectiveContextWindow(econ.model, econ.contextTokens);
       const perTurnUsd =
         (econ.contextTokens * cacheReadPricePerMtok(econ.model)) / 1_000_000;
       let handoffOk = false;
@@ -771,7 +780,7 @@ const HTML = String.raw`<!doctype html>
         <tbody></tbody>
       </table>
       <p class="nudge-hint">
-        Per-agent live context occupancy, sorted by % desc — most-urgent first. The "Copy prompt" button copies the operator's standard "your context is high, ready to clear/compact?" prompt with that agent's measured numbers interpolated. <strong>The button never types into a terminal</strong> — you paste it manually. Same source of truth as <span class="mono">claudelink prompt-clear</span>.
+        Per-agent live context occupancy, sorted by % desc — most-urgent first. <strong>Copy prompt</strong> copies the operator's standard "your context is high, ready to clear/compact?" prompt with that agent's measured numbers interpolated — it never types into a terminal; you paste it manually (same source as <span class="mono">claudelink prompt-clear</span>). <strong>Compact</strong> and <strong>Clear</strong> are your manual override: they start the same consent handshake the watcher uses, but on demand instead of at the occupancy threshold. The agent is asked to flush its handover and consent; the action fires a tick or two later, once it acknowledges — nothing fires mid-work or without a yes. <strong>Clear additionally won't fire without a verified handover</strong> (it's a full wipe). Skips the allowlist/economics gates (your click authorizes it); dispatch works for tmux &amp; iTerm2 only.
       </p>
     </div>
   </section>
@@ -1081,7 +1090,11 @@ function renderFleet(state) {
       '<td class="mono" style="text-align:right">$' + f.per_turn_usd.toFixed(2) + '</td>' +
       '<td>' + handoffCell + '</td>' +
       '<td>' + sigCell + '</td>' +
-      '<td><button class="row-action" data-copy-prompt="' + escapeHtml(a.role) + '">Copy prompt</button></td>';
+      '<td><div style="display:flex;gap:6px;justify-content:flex-end">' +
+        '<button class="row-action" data-copy-prompt="' + escapeHtml(a.role) + '">Copy prompt</button>' +
+        '<button class="row-action" data-trigger-id="' + escapeHtml(a.id) + '" data-trigger-cmd="/compact" data-trigger-role="' + escapeHtml(a.role) + '" data-trigger-pct="' + pct.toFixed(0) + '">Compact</button>' +
+        '<button class="row-action danger" data-trigger-id="' + escapeHtml(a.id) + '" data-trigger-cmd="/clear" data-trigger-role="' + escapeHtml(a.role) + '" data-trigger-pct="' + pct.toFixed(0) + '">Clear</button>' +
+      '</div></td>';
     fb.appendChild(tr);
   }
 }
@@ -1097,6 +1110,36 @@ async function copyPromptForRole(role) {
     toast("Prompt for " + role + " copied — paste into that terminal.");
   } catch (e) {
     toast("Copy failed: " + (e && e.message ? e.message : String(e)), "error");
+  }
+}
+
+// Manual override — QUEUES a consent-gated /compact or /clear. The watcher asks
+// the agent to flush its handoff and consent, then fires the action a tick or
+// two later. Bypasses the occupancy/economics/allowlist gates (the click is the
+// authorization) but keeps the safe handshake — nothing fires until the agent
+// acknowledges.
+async function triggerForAgent(id, command, role, pct) {
+  const isClear = command === "/clear";
+  const prompt = isClear
+    ? "⚠️  Request /clear for \"" + role + "\" (" + pct + "%)?\n\n" +
+      "This does NOT clear immediately. " + role + " is first asked to write a COMPLETE " +
+      "handover; the wipe fires only after it consents AND that handover is verified. " +
+      "Nothing is lost in the meantime."
+    : "Request /compact for \"" + role + "\" (" + pct + "%)?\n\n" +
+      role + " is asked to flush its handover and consent; the compact fires a moment " +
+      "later, once it acknowledges. Skips the occupancy/economics gates but keeps the " +
+      "safe handshake.";
+  if (!confirm(prompt)) return;
+  try {
+    const r = await api("/api/agents/" + encodeURIComponent(id) + "/trigger", "POST", { command });
+    if (r && r.ok) {
+      toast(command + " requested for " + role + " — it'll be asked to consent, then " +
+        (isClear ? "cleared" : "compacted") + " (usually within a couple of minutes).");
+    } else {
+      toast(command + " could not be queued for " + role, "error");
+    }
+  } catch (e) {
+    toast(command + ": " + ((e && e.message) ? e.message : String(e)), "error");
   }
 }
 
@@ -1134,6 +1177,16 @@ document.addEventListener("click", async (e) => {
   const killPid = t.getAttribute("data-kill-pid");
   const removeId = t.getAttribute("data-remove-id");
   const copyPromptRole = t.getAttribute("data-copy-prompt");
+  const triggerId = t.getAttribute("data-trigger-id");
+  if (triggerId) {
+    triggerForAgent(
+      triggerId,
+      t.getAttribute("data-trigger-cmd"),
+      t.getAttribute("data-trigger-role") || triggerId,
+      t.getAttribute("data-trigger-pct")
+    );
+    return;
+  }
   if (killPid) {
     if (!confirm("Kill PID " + killPid + " (claudelink-server)?")) return;
     try {
@@ -1548,6 +1601,74 @@ export function startUIServer(port = 7878): http.Server {
         req.on("error", (e: any) => send(400, { error: e.message }));
         return;
       }
+      // Manual founder override — QUEUES a consent-gated /compact or /clear for
+      // the named agent. It does NOT type the command directly: the watcher
+      // picks up the queued action on its next tick, ASKS the agent to flush its
+      // handoff and consent, and fires the action only once that genuine consent
+      // lands (and, for /clear, a verified handoff). This is the same safe
+      // handshake as the autonomous path, just started by a button instead of
+      // the occupancy threshold — bypassing only the allowlist/economics gates
+      // (the click is the authorization). Keyed by agent `id`, NOT role: roles
+      // can collide and a destructive action must target exactly one terminal.
+      // command is an exact-match whitelist — never caller-supplied free text.
+      if (req.method === "POST" && p.startsWith("/api/agents/") && p.endsWith("/trigger")) {
+        const inner = p.slice("/api/agents/".length, p.length - "/trigger".length);
+        const agentId = decodeURIComponent(inner);
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            const command = parsed.command;
+            if (command !== "/compact" && command !== "/clear") {
+              return send(400, { error: 'command must be exactly "/compact" or "/clear"' });
+            }
+            const action: "compact" | "clear" = command === "/clear" ? "clear" : "compact";
+            // The watcher must be running to process the queued trigger.
+            if (!readContextWatcherSettings().enabled) {
+              return send(409, { error: "context watcher is disabled — enable it (Watcher panel) so the trigger can run" });
+            }
+            // Validate the target, then queue the action with a request stamp.
+            const db2 = new Database(DB_PATH());
+            // A founder click is a third writer alongside the MCP servers
+            // (register / setCheckpoint) and the watcher's consume — tolerate
+            // brief contention instead of throwing SQLITE_BUSY.
+            db2.pragma("busy_timeout = 5000");
+            try {
+              const row = db2
+                .prepare(`SELECT id, role, tty, terminal_app, pid FROM agents WHERE id = ? LIMIT 1`)
+                .get(agentId) as
+                | { id: string; role: string; tty: string | null; terminal_app: string | null; pid: number }
+                | undefined;
+              if (!row) {
+                return send(404, { error: `no registered agent with id "${agentId}"` });
+              }
+              if (!row.tty) {
+                return send(400, { error: `agent "${row.role}" registered before v2 (no tty) — restart its session to enable triggers` });
+              }
+              if (!isProcessAlive(row.pid)) {
+                return send(400, { error: `agent "${row.role}" process (pid ${row.pid}) is not alive` });
+              }
+              db2
+                .prepare(`UPDATE agents SET manual_action = ?, manual_action_ts = ? WHERE id = ?`)
+                .run(action, Date.now(), row.id);
+              try {
+                fs.appendFileSync(
+                  path.join(os.homedir(), ".claudelink", "manual-trigger.log"),
+                  `${new Date().toISOString()} QUEUED role="${row.role}" id=${row.id} action=${action} tty=${row.tty} app="${row.terminal_app ?? "null"}"\n`
+                );
+              } catch {}
+              send(200, { ok: true, queued: true, role: row.role, action });
+            } finally {
+              db2.close();
+            }
+          } catch (e: any) {
+            send(400, { error: e.message });
+          }
+        });
+        req.on("error", (e: any) => send(400, { error: e.message }));
+        return;
+      }
       if (req.method === "POST" && p === "/api/quit-ui") {
         send(200, { ok: true });
         setTimeout(() => {
@@ -1626,7 +1747,7 @@ export function startUIServer(port = 7878): http.Server {
               role,
               model: econ.model,
               contextTokens: econ.contextTokens,
-              windowTokens: modelContextWindow(econ.model),
+              windowTokens: effectiveContextWindow(econ.model, econ.contextTokens),
               perTurnUsd:
                 (econ.contextTokens * cacheReadPricePerMtok(econ.model)) /
                 1_000_000,

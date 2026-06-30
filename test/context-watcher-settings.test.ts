@@ -137,3 +137,37 @@ test("mode defaults to 'observe' (never injects out of the box)", () => {
   const s = readContextWatcherSettings();
   assert.equal(s.mode, "observe");
 });
+
+// ── T1 consent handshake settings ──
+
+test("askMessage has a non-empty default and mentions signal_checkpoint", () => {
+  reset();
+  const s = readContextWatcherSettings();
+  assert.ok(s.askMessage.length > 0);
+  assert.match(s.askMessage, /signal_checkpoint/);
+  assert.match(s.askMessage, /safe_to_clear=true/);
+});
+
+test("askMessage falls back to default when set to empty string", () => {
+  reset();
+  const def = readContextWatcherSettings().askMessage;
+  writeContextWatcherSettings({ askMessage: "" });
+  assert.equal(readContextWatcherSettings().askMessage, def);
+});
+
+test("askMessage round-trips a custom value", () => {
+  reset();
+  writeContextWatcherSettings({ askMessage: "ok to compact?" });
+  assert.equal(readContextWatcherSettings().askMessage, "ok to compact?");
+});
+
+test("consentFreshMin defaults to 15 and clamps to [1, 120]", () => {
+  reset();
+  assert.equal(readContextWatcherSettings().consentFreshMin, 15);
+  writeContextWatcherSettings({ consentFreshMin: 0 });
+  assert.equal(readContextWatcherSettings().consentFreshMin, 1);
+  writeContextWatcherSettings({ consentFreshMin: 999 });
+  assert.equal(readContextWatcherSettings().consentFreshMin, 120);
+  writeContextWatcherSettings({ consentFreshMin: 20 });
+  assert.equal(readContextWatcherSettings().consentFreshMin, 20);
+});

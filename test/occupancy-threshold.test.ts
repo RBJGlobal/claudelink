@@ -22,7 +22,7 @@ import {
   readContextWatcherSettings,
   writeContextWatcherSettings,
 } from "../src/context-watcher-settings.js";
-import { modelContextWindow } from "../src/usage-reader.js";
+import { modelContextWindow, effectiveContextWindow } from "../src/usage-reader.js";
 
 function reset() {
   if (fs.existsSync(TMP_SETTINGS)) fs.unlinkSync(TMP_SETTINGS);
@@ -50,6 +50,28 @@ test("modelContextWindow returns 1M for a -1m variant", () => {
 test("modelContextWindow handles empty / unknown model strings as 200K", () => {
   assert.equal(modelContextWindow(""), 200_000);
   assert.equal(modelContextWindow("some-unknown-model"), 200_000);
+});
+
+// ---- effectiveContextWindow (evidence-based 1M inference) ----
+
+test("effectiveContextWindow infers 1M when observed context exceeds 200K", () => {
+  // A 200K-window model would have its request rejected at >200K, so a recorded
+  // 572K turn proves the session is on a 1M window even though Claude Code logs
+  // the model as plain claude-opus-4-8 (the 1M beta is a request header).
+  assert.equal(effectiveContextWindow("claude-opus-4-8", 571_990), 1_000_000);
+  assert.equal(effectiveContextWindow("claude-opus-4-8", 290_473), 1_000_000);
+});
+
+test("effectiveContextWindow keeps the model default at or below 200K", () => {
+  // Below the threshold the label is unchanged — correct for a 200K model and
+  // harmless for a 1M one; the inference only corrects the misleading >100% case.
+  assert.equal(effectiveContextWindow("claude-opus-4-8", 150_000), 200_000);
+  assert.equal(effectiveContextWindow("claude-opus-4-8", 200_000), 200_000); // exactly at limit
+  assert.equal(effectiveContextWindow("claude-opus-4-8", 0), 200_000);
+});
+
+test("effectiveContextWindow still honors an explicit 1M model marker below 200K", () => {
+  assert.equal(effectiveContextWindow("claude-opus-4-7[1m]", 50_000), 1_000_000);
 });
 
 // ---- contextOccupancyThreshold setting ----

@@ -26,13 +26,14 @@ import path from "path";
 import os from "os";
 import readline from "readline";
 import Database from "better-sqlite3";
+import { NexusDB } from "./db.js";
 import {
   cwdForPid,
   projectIdFromCwd,
   PROJECTS_DIR,
   OPUS_CACHE_READ_PER_MTOK,
   cacheReadPricePerMtok,
-  modelContextWindow,
+  effectiveContextWindow,
 } from "./usage-reader.js";
 import {
   readContextWatcherSettings,
@@ -42,12 +43,8 @@ import {
 } from "./context-watcher-settings.js";
 import { injectKeystroke, NudgeCandidate } from "./scheduler.js";
 import { verifyHandoff } from "./compact-executor.js";
-
-// Safety gate for armed inject: the agent's consent signal must be within this
-// many real turns of "now" (it hasn't worked far past the checkpoint its
-// handoff describes). Turns, not wall-clock — an idle agent that signaled and
-// hasn't moved is still at its safe checkpoint.
-const MAX_TURNS_SINCE_SIGNAL = 5;
+import { decideCompactAction } from "./compact-decision.js";
+import { decideManualAction } from "./manual-decision.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -172,11 +169,41 @@ interface WatchedAgent {
   checkpoint_ts: number | null;
   checkpoint_safe_to_clear: number;
   checkpoint_handoff_path: string | null;
+  checkpoint_consent_ts: number | null;
+  // Pending founder-clicked manual override (Command Center). "compact"|"clear"
+  // while a handshake is in flight, else NULL. manual_action_ts anchors the
+  // request so consent must postdate it and a forgotten request can expire.
+  manual_action: "compact" | "clear" | null;
+  manual_action_ts: number | null;
 }
 
 // Safety-gate freshness for the OBSERVE correlation log. A coarse time window;
 // the armed phase uses the precise "within K turns of the signal" test.
 const CHECKPOINT_FRESH_MS = 10 * 60 * 1000;
+
+// A pending manual override that never reaches a fire (agent stays busy, never
+// consents, terminal closed) expires after this window so a long-forgotten
+// click can't fire hours later.
+const MANUAL_TTL_MS = 30 * 60 * 1000;
+
+// A terminal whose latest transcript turn is a `user` entry (e.g. parked after a
+// /compact, /cost or other local command — the agent never replies to those) is
+// invisible to the strict idle gate, which only flips on an assistant turn. For
+// the MANUAL override (founder-authorized), treat such a turn as idle-enough
+// once it's been quiet this long: an agent genuinely mid-response writes an
+// assistant turn within seconds, so this age means "parked", not "in-flight".
+const MANUAL_PARKED_SEC = 120;
+
+// The consent ASK typed for a manual /clear. Stronger than the /compact ask: a
+// /clear is a full context wipe with NO in-place summary, so consent REQUIRES a
+// complete handoff file whose path is passed to signal_checkpoint — the watcher
+// verifies that file exists before it ever fires /clear.
+const MANUAL_CLEAR_ASK =
+  "Manual /clear requested (full context wipe — NO summary is kept). To consent: " +
+  "FIRST write a COMPLETE handoff file with everything needed to resume this work, " +
+  "THEN call signal_checkpoint with safe_to_clear=true and handoff_path set to that file. " +
+  "I will /clear you on the next check ONLY once that handoff is verified. If now is a bad " +
+  "moment, call signal_checkpoint with safe_to_clear=false and a one-line note and I'll hold off.";
 
 // Maximum staleness for a v3-captured transcript_path before we treat it as
 // suspect and fall back to the heuristic + ambiguous flag. Sessions can be
@@ -457,7 +484,17 @@ export async function projectCompactOpportunity(
 export async function armGate(
   file: string,
   checkpointTs: number | null
-): Promise<{ idle: boolean; turnsSinceSignal: number; detail: string }> {
+): Promise<{
+  idle: boolean;
+  turnsSinceSignal: number;
+  detail: string;
+  // The chronologically-latest real turn's type ("user"|"assistant"|"none") and
+  // its age in seconds. Exposed so the manual-override path can recognize a
+  // terminal PARKED after a local command (latest=user, no assistant reply) as
+  // idle-enough — the strict idle gate only ever flips on an assistant turn.
+  latestType: string;
+  ageSec: number;
+}> {
   let latest: {
     type: string;
     stop: string | null;
@@ -493,7 +530,13 @@ export async function armGate(
     input.destroy();
   }
   if (!latest)
-    return { idle: false, turnsSinceSignal: 999, detail: "no real turns" };
+    return {
+      idle: false,
+      turnsSinceSignal: 999,
+      detail: "no real turns",
+      latestType: "none",
+      ageSec: Infinity,
+    };
   const ageSec = (Date.now() - latest.ts) / 1000;
   const idle =
     latest.type === "assistant" &&
@@ -504,12 +547,17 @@ export async function armGate(
     idle,
     turnsSinceSignal: turnsSince,
     detail: `last=${latest.type}/${latest.stop} age=${ageSec.toFixed(0)}s turnsSinceSignal=${turnsSince}`,
+    latestType: latest.type,
+    ageSec,
   };
 }
 
 interface SessionState {
   lastNudgedAt: number;
   nudgeCount: number;
+  // T1 handshake: last time we typed the consent ASK to this agent. Throttles
+  // re-asking (NOT firing) — firing rests on durable DB consent, not this.
+  lastAskedAt: number;
 }
 
 export interface ContextWatcherHandle {
@@ -519,6 +567,21 @@ export interface ContextWatcherHandle {
 }
 
 export function startContextWatcher(): ContextWatcherHandle {
+  // SELF-SUFFICIENT MIGRATION. The watcher reads schema-v5 columns
+  // (checkpoint_consent_ts) through raw readonly handles and never migrates on
+  // its own. Its host (ui-server) doesn't construct a NexusDB either, so absent
+  // this, the column would exist only if a NEW-code claudelink-server happened
+  // to boot first — a deploy-order race that would make every tick throw "no
+  // such column" and silently kill the watcher. Constructing a NexusDB once
+  // runs migrations idempotently against the same DB, then we close it and rely
+  // on the raw handles. Fail-open: a migration error is logged, not thrown.
+  try {
+    const migrator = new NexusDB();
+    migrator.close();
+  } catch (e: any) {
+    logLine(`startup-migration-failed: ${e?.message ?? String(e)}`);
+  }
+
   let db: Database.Database | null = null;
   let timer: NodeJS.Timeout | null = null;
   let tickInProgress = false;
@@ -529,11 +592,53 @@ export function startContextWatcher(): ContextWatcherHandle {
     return db;
   };
 
+  // Separate WRITABLE handle, opened lazily, used only to consume an agent's
+  // /compact consent after firing (reset safe_to_clear→0, clear the anchor) so
+  // one yes maps to one compact. The main handle stays readonly by design; WAL
+  // tolerates a concurrent reader + this writer.
+  let writeDb: Database.Database | null = null;
+  const consumeConsent = (agentId: string): void => {
+    try {
+      if (!writeDb) {
+        writeDb = new Database(DB_PATH);
+        // Match NexusDB: tolerate brief contention with the MCP servers that
+        // also write this DB (register / setCheckpoint / messages).
+        writeDb.pragma("busy_timeout = 5000");
+      }
+      writeDb
+        .prepare(
+          `UPDATE agents SET checkpoint_safe_to_clear = 0, checkpoint_consent_ts = NULL WHERE id = ?`
+        )
+        .run(agentId);
+    } catch (e: any) {
+      logLine(`consume-consent-failed ${agentId}: ${e?.message ?? String(e)}`);
+    }
+  };
+
+  // Clear a pending manual override after firing or expiring it, on the same
+  // writable handle. One click → one action; the column must not survive a fire.
+  const clearManualAction = (agentId: string): void => {
+    try {
+      if (!writeDb) {
+        writeDb = new Database(DB_PATH);
+        writeDb.pragma("busy_timeout = 5000");
+      }
+      writeDb
+        .prepare(
+          `UPDATE agents SET manual_action = NULL, manual_action_ts = NULL WHERE id = ?`
+        )
+        .run(agentId);
+    } catch (e: any) {
+      logLine(`clear-manual-failed ${agentId}: ${e?.message ?? String(e)}`);
+    }
+  };
+
   const liveAgents = (): WatchedAgent[] => {
     const rows = openDb()
       .prepare(
         `SELECT id, role, pid, tty, terminal_app, pane_id, session_id, transcript_path,
-                checkpoint_ts, checkpoint_safe_to_clear, checkpoint_handoff_path
+                checkpoint_ts, checkpoint_safe_to_clear, checkpoint_handoff_path,
+                checkpoint_consent_ts, manual_action, manual_action_ts
            FROM agents`
       )
       .all() as WatchedAgent[];
@@ -552,8 +657,158 @@ export function startContextWatcher(): ContextWatcherHandle {
       if (!s.enabled) return summary;
       const now = Date.now();
       const cooldownMs = s.cooldownMin * 60 * 1000;
+      const live = liveAgents();
 
-      for (const a of liveAgents()) {
+      // ── MANUAL OVERRIDES ──────────────────────────────────────────────────
+      // Founder-clicked Compact/Clear from the Command Center, handled in their
+      // own pass — fully independent of the occupancy / economics / allowlist /
+      // mode machinery below. A click is explicit per-terminal authorization, so
+      // those gates are bypassed; only the SAFETY gates remain (idle, a GENUINE
+      // consent that POSTDATES the click, a verified handoff for /clear, and no
+      // ambiguous session at FIRE time) plus a TTL so a forgotten click never
+      // fires later. Ambiguity does NOT block the ASK — a parked terminal reads
+      // ambiguous, and the ask (typed by exact tty) is what wakes it.
+      // Same ask + keystroke path as the autonomous handshake.
+      for (const a of live) {
+        const manual = a.manual_action;
+        if (manual !== "compact" && manual !== "clear") continue;
+
+        const ckMin: number | null =
+          a.checkpoint_ts != null ? (now - a.checkpoint_ts) / 60000 : null;
+        const requestedTs = a.manual_action_ts ?? now;
+        const ageMs = now - requestedTs;
+        const st =
+          state.get(a.id) || { lastNudgedAt: 0, nudgeCount: 0, lastAskedAt: 0 };
+
+        const session = resolveSession(a);
+        if (!session) {
+          // Can't target it (no live transcript) — keep pending until the TTL
+          // mops it up, but log loudly so a click that "did nothing" is visible.
+          if (ageMs > MANUAL_TTL_MS) {
+            clearManualAction(a.id);
+            logLine(`manual-expired ${a.role} action=${manual} (no session)`);
+          }
+          logGateStatus({
+            role: a.role,
+            agent_id: a.id,
+            mode: s.mode,
+            decision: "manual-skip-no-session",
+            reason: `${manual}: no live session to target (kept until ttl)`,
+            signal_age_min: ckMin,
+            safe_to_clear: a.checkpoint_safe_to_clear === 1 ? 1 : 0,
+          });
+          continue;
+        }
+
+        const ag = await armGate(session.file, a.checkpoint_ts);
+        const handoffOk =
+          !!a.checkpoint_handoff_path &&
+          verifyHandoff(a.checkpoint_handoff_path).ok;
+        // Relaxed idle for the founder-authorized override: strict idle, OR a
+        // terminal parked after a local command (latest=user, quiet > the parked
+        // threshold). Safe — the ASK only queues into the input buffer, and FIRE
+        // still needs a POSTDATED genuine consent, which requires the agent to
+        // have produced an assistant turn (the signal_checkpoint call) first.
+        const parkedAfterUser =
+          ag.latestType === "user" && ag.ageSec >= MANUAL_PARKED_SEC;
+        const idleEnough = ag.idle || parkedAfterUser;
+
+        const action = decideManualAction({
+          requested: manual,
+          idle: idleEnough,
+          ambiguous: session.ambiguous,
+          safeToClear: a.checkpoint_safe_to_clear === 1,
+          consentTs: a.checkpoint_consent_ts,
+          requestedTs,
+          handoffOk,
+          // The watcher owns the ask, so lastAskedAt is the only ask clock —
+          // requestedTs must NOT be reused here or the first prompt waits a full
+          // cooldown after the click.
+          msSinceLastAsk: st.lastAskedAt > 0 ? now - st.lastAskedAt : null,
+          askCooldownMs: cooldownMs,
+          ageMs,
+          ttlMs: MANUAL_TTL_MS,
+        });
+
+        const candidate: NudgeCandidate = {
+          id: a.id,
+          role: a.role,
+          tty: a.tty || "",
+          terminal_app: a.terminal_app,
+          pane_id: a.pane_id,
+          pid: a.pid,
+        };
+        const detail = parkedAfterUser ? `${ag.detail} parked=true` : ag.detail;
+        const mFields: Partial<GateStatusFields> = {
+          role: a.role,
+          agent_id: a.id,
+          mode: s.mode,
+          idle: idleEnough,
+          ambiguous: session.ambiguous,
+          handoff_ok: handoffOk,
+          signal_age_min: ckMin,
+          signal_age_turns: ag.turnsSinceSignal,
+          safe_to_clear: a.checkpoint_safe_to_clear === 1 ? 1 : 0,
+        };
+
+        if (action.kind === "skip") {
+          if (action.reason === "expired") {
+            clearManualAction(a.id);
+            logLine(`manual-expired ${a.role} action=${manual}`);
+          }
+          logGateStatus({
+            ...(mFields as GateStatusFields),
+            decision: "manual-skip",
+            reason: `${manual}: ${action.reason} (${detail})`,
+          });
+          continue;
+        }
+
+        if (action.kind === "ask") {
+          const askMsg = manual === "clear" ? MANUAL_CLEAR_ASK : s.askMessage;
+          const result = injectKeystroke(candidate, askMsg);
+          // Arm the re-ask cooldown only when the prompt actually landed (ok), or
+          // can never land (skip = unsupported terminal — permanent, don't retry
+          // every tick). A "fail" is a TRANSIENT iTerm2 timeout (osascript queued
+          // behind TUI rendering); leave lastAskedAt untouched so the NEXT tick
+          // (~30s) retries instead of stalling a full cooldown — bounded by the
+          // manual TTL. Without this, one timed-out inject silently parks the
+          // terminal for the whole cooldown.
+          if (result !== "fail") st.lastAskedAt = now;
+          state.set(a.id, st);
+          logGateStatus({
+            ...(mFields as GateStatusFields),
+            decision: "manual-ask-consent",
+            reason: `${manual}: asked for consent result=${result}`,
+          });
+          continue;
+        }
+
+        // action.kind === "fire" — postdated consent + idle (+ verified handoff
+        // for /clear). CONSUME consent and CLEAR the request only on a successful
+        // keystroke, so one yes maps to one action and a failed inject is retried
+        // next tick instead of silently dropped.
+        const result = injectKeystroke(candidate, action.command);
+        if (result === "ok") {
+          consumeConsent(a.id);
+          clearManualAction(a.id);
+          summary.injected++;
+        }
+        logGateStatus({
+          ...(mFields as GateStatusFields),
+          decision: "manual-FIRE",
+          reason:
+            `action=${action.command} result=${result} ` +
+            (result === "ok"
+              ? "consumed=consent cleared=manual"
+              : "(kept pending — retry next tick)"),
+        });
+        continue;
+      }
+
+      for (const a of live) {
+        if (a.manual_action === "compact" || a.manual_action === "clear")
+          continue; // owned by the manual-override pass above
         summary.checked++;
 
         // Common header — every emitted gate-status line carries these.
@@ -612,7 +867,7 @@ export function startContextWatcher(): ContextWatcherHandle {
         // model = 50% occupancy, which is the default arming threshold. The
         // dollar value is still computed for observability but no longer
         // arms by itself.
-        const windowTokens = modelContextWindow(econ.model);
+        const windowTokens = effectiveContextWindow(econ.model, econ.contextTokens);
         const occupancyFrac = econ.contextTokens / windowTokens;
         const occupancyPct = occupancyFrac * 100;
         const cacheReadPrice = cacheReadPricePerMtok(econ.model);
@@ -637,24 +892,11 @@ export function startContextWatcher(): ContextWatcherHandle {
         }
         summary.flagged++;
 
-        const st = state.get(a.role) || { lastNudgedAt: 0, nudgeCount: 0 };
-        if (now - st.lastNudgedAt < cooldownMs) {
-          logGateStatus({
-            role: a.role,
-            agent_id: a.id,
-            mode: s.mode,
-            decision: "skip-cooldown",
-            reason: `nudgedAt=${new Date(st.lastNudgedAt).toISOString()} cooldownMin=${s.cooldownMin}`,
-            context: econ.contextTokens,
-            occupancy_pct: occupancyPct,
-            model: econ.model,
-            per_turn_usd: perTurnCostUsd,
-            ambiguous: session.ambiguous,
-            signal_age_min: ckMinNum,
-            safe_to_clear: a.checkpoint_safe_to_clear === 1 ? 1 : 0,
-          });
-          continue;
-        }
+        // Per-agent throttle state, keyed by agent_id (NOT role): duplicate
+        // live roles must not share one cooldown/ask counter. The cooldown is
+        // applied per-branch below — it throttles ASKING (and observe nudges),
+        // never the FIRE, which rests on durable DB consent.
+        const st = state.get(a.id) || { lastNudgedAt: 0, nudgeCount: 0, lastAskedAt: 0 };
 
         // ── DECISION (fires): only act when forward savings clearly beat the
         // handshake overhead, AND the session is actively progressing (else a
@@ -693,8 +935,17 @@ export function startContextWatcher(): ContextWatcherHandle {
         };
 
         if (s.mode === "observe") {
-          // Nudge path: gate on the session being actively progressing (don't
-          // pay handshake overhead on one about to idle) + net-positive.
+          // Nudge path: throttle re-nudges, then gate on the session being
+          // actively progressing (don't pay handshake overhead on one about to
+          // idle) + net-positive.
+          if (now - st.lastNudgedAt < cooldownMs) {
+            logGateStatus({
+              ...(commonFields as GateStatusFields),
+              decision: "skip-cooldown",
+              reason: `nudgedAt=${new Date(st.lastNudgedAt).toISOString()} cooldownMin=${s.cooldownMin}`,
+            });
+            continue;
+          }
           if (!(activelyProgressing && netPositive)) {
             logGateStatus({
               ...(commonFields as GateStatusFields),
@@ -706,7 +957,7 @@ export function startContextWatcher(): ContextWatcherHandle {
           summary.wouldNudge++;
           st.lastNudgedAt = now;
           st.nudgeCount++;
-          state.set(a.role, st);
+          state.set(a.id, st);
           logGateStatus({
             ...(commonFields as GateStatusFields),
             decision: "would-nudge",
@@ -728,42 +979,44 @@ export function startContextWatcher(): ContextWatcherHandle {
             });
             continue;
           }
-          // Then the SAFETY stack — compaction wants the agent IDLE, the
-          // opposite of the nudge path. For the lossless /compact action the
-          // gates that MUST hold before we type into a live terminal are:
-          //   - fresh consent: a checkpoint signal landed within K real turns.
-          //     The Stop hook now touches checkpoint_ts at every turn boundary,
-          //     so for agents with the hook installed this is automatically
-          //     true at the natural turn end (the only safe instant to inject);
-          //   - idle: last turn ENDED + quiet (not mid-turn / mid-tool-call);
-          //   - NOT an ambiguous shared-repo session (can't safely target it).
+          // T1 CONSENT HANDSHAKE. The armed path no longer silently fires
+          // /compact on mere turn-boundary freshness (which the Stop hook
+          // satisfies every turn — the agent never actually consented). It now:
+          //   FIRE — only on a GENUINE consent (checkpoint_safe_to_clear===1,
+          //          set solely by an explicit signal_checkpoint(true) and
+          //          unforgeable by the per-turn hook touch) that is still fresh
+          //          (within consentFreshMin) AND the agent is idle right now;
+          //   ASK  — when occupancy is high + idle + economically worth a turn
+          //          and no fire-eligible consent exists, type askMessage to
+          //          request that consent (throttled by cooldown).
+          // Never act on an ambiguous shared-repo session.
           //
-          // handoff_ok (a verified handoff file pointer) is STILL computed +
-          // logged for visibility, but it is NOT a gate for /compact. Reason:
-          // /compact is soft-recoverable — it summarizes the context in place
-          // and the agent stays alive on the same transcript; the idle gate
-          // already prevents mid-tool-call interruption, so there is nothing
-          // to "resume from" a separate handoff file. handoff_ok stays as the
-          // stronger gate reserved for the future destructive /clear path,
-          // where the agent's state would actually be discarded.
+          // handoff_ok is STILL computed + logged for visibility but is NOT a
+          // gate: /compact is soft-recoverable (it summarizes in place; the idle
+          // gate prevents mid-tool-call interruption), so the ask ENCOURAGES a
+          // handoff update without hard-gating on it. handoff_ok stays the
+          // stronger gate reserved for the future destructive /clear path.
           const ag = await armGate(session.file, a.checkpoint_ts);
-          const freshConsent =
-            a.checkpoint_ts != null && ag.turnsSinceSignal <= MAX_TURNS_SINCE_SIGNAL;
           const handoffOk = !!a.checkpoint_handoff_path && verifyHandoff(a.checkpoint_handoff_path).ok;
-          if (!(ag.idle && freshConsent && !session.ambiguous)) {
-            logGateStatus({
-              ...(commonFields as GateStatusFields),
-              decision: "inject-skip-safety",
-              reason: ag.detail,
-              allowlisted: true,
-              idle: ag.idle,
-              fresh_consent: freshConsent,
-              handoff_ok: handoffOk,
-              signal_age_turns: ag.turnsSinceSignal,
-            });
-            continue;
-          }
-          // ALL GATES GREEN — inject the consented action (one shot).
+          const consentFreshMs = s.consentFreshMin * 60 * 1000;
+          const consentAgeMs =
+            a.checkpoint_consent_ts != null ? now - a.checkpoint_consent_ts : null;
+          const consentFresh =
+            a.checkpoint_safe_to_clear === 1 &&
+            consentAgeMs !== null &&
+            consentAgeMs < consentFreshMs;
+
+          const action = decideCompactAction({
+            idle: ag.idle,
+            ambiguous: session.ambiguous,
+            safeToClear: a.checkpoint_safe_to_clear === 1,
+            consentAgeMs,
+            consentFreshMs,
+            economicGreen,
+            msSinceLastAsk: st.lastAskedAt > 0 ? now - st.lastAskedAt : null,
+            askCooldownMs: cooldownMs,
+          });
+
           const candidate: NudgeCandidate = {
             id: a.id,
             role: a.role,
@@ -772,16 +1025,47 @@ export function startContextWatcher(): ContextWatcherHandle {
             pane_id: a.pane_id,
             pid: a.pid,
           };
-          // LATCH FIRST: persist enabled=false BEFORE injecting. If the process
-          // crashes between the inject and the latch, it must NOT re-fire on
-          // restart — so the latch lands first. Injection failing is recoverable
-          // (re-enable manually); a double-inject is not (you can't un-inject).
+          const injectFields: Partial<GateStatusFields> = {
+            allowlisted: true,
+            idle: ag.idle,
+            fresh_consent: consentFresh,
+            handoff_ok: handoffOk,
+            signal_age_turns: ag.turnsSinceSignal,
+          };
+
+          if (action.kind === "skip") {
+            logGateStatus({
+              ...(commonFields as GateStatusFields),
+              ...injectFields,
+              decision: "inject-skip-safety",
+              reason: `${action.reason} (${ag.detail})`,
+            });
+            continue;
+          }
+
+          if (action.kind === "ask") {
+            // Asking is NOT the irreversible action — do NOT latch oneShot here.
+            const result = injectKeystroke(candidate, s.askMessage);
+            st.lastAskedAt = now;
+            state.set(a.id, st);
+            logGateStatus({
+              ...(commonFields as GateStatusFields),
+              ...injectFields,
+              decision: "inject-ask-consent",
+              reason: `asked for consent result=${result}`,
+            });
+            continue;
+          }
+
+          // action.kind === "fire" — a genuine, fresh consent + idle now.
+          // LATCH FIRST: persist enabled=false BEFORE the irreversible /compact.
+          // If the process crashes between inject and latch it must NOT re-fire
+          // on restart, so the latch lands first. A failed inject is recoverable
+          // (re-enable manually); a double-/compact is not.
           //
-          // LATCH FAILURE GUARD: writeContextWatcherSettings can throw on a
-          // full disk / permission error. If the latch fails we MUST NOT
-          // proceed to inject — otherwise the entire latch-first design is
-          // defeated (next tick re-passes gates, fires again, etc.). Skip
-          // this agent and log loudly so the operator notices.
+          // LATCH FAILURE GUARD: writeContextWatcherSettings can throw on a full
+          // disk / permission error. If the latch fails we MUST NOT proceed —
+          // skip this agent and log loudly.
           if (s.oneShot) {
             try {
               writeContextWatcherSettings({ enabled: false });
@@ -789,31 +1073,31 @@ export function startContextWatcher(): ContextWatcherHandle {
             } catch (e: any) {
               logGateStatus({
                 ...(commonFields as GateStatusFields),
+                ...injectFields,
                 decision: "inject-LATCH-FAILED",
                 reason: e?.message ?? String(e),
-                allowlisted: true,
-                idle: ag.idle,
-                fresh_consent: freshConsent,
-                handoff_ok: handoffOk,
-                signal_age_turns: ag.turnsSinceSignal,
               });
               continue;
             }
           }
           const result = injectKeystroke(candidate, s.message);
+          // CONSUME the consent only on a SUCCESSFUL inject: one yes → one
+          // compact. Post-/compact the flag would otherwise still read 1 and
+          // re-fire next tick (non-oneShot); this also stops a stale yes firing
+          // after restart. Gated on "ok" so a failed keystroke (skip/fail)
+          // preserves the consent for a legitimate retry instead of silently
+          // burning it (oneShot's latch masks this today, but non-oneShot
+          // would otherwise drop the compact entirely).
+          if (result === "ok") consumeConsent(a.id);
           summary.injected++;
           st.lastNudgedAt = now;
           st.nudgeCount++;
-          state.set(a.role, st);
+          state.set(a.id, st);
           logGateStatus({
             ...(commonFields as GateStatusFields),
+            ...injectFields,
             decision: "inject-ARMED-FIRE",
-            reason: `action=${JSON.stringify(s.message)} result=${result}`,
-            allowlisted: true,
-            idle: ag.idle,
-            fresh_consent: freshConsent,
-            handoff_ok: handoffOk,
-            signal_age_turns: ag.turnsSinceSignal,
+            reason: `action=${JSON.stringify(s.message)} result=${result} consumed=consent`,
           });
           if (s.oneShot) break;
         }
@@ -857,6 +1141,14 @@ export function startContextWatcher(): ContextWatcherHandle {
         /* ignore */
       }
       db = null;
+    }
+    if (writeDb) {
+      try {
+        writeDb.close();
+      } catch {
+        /* ignore */
+      }
+      writeDb = null;
     }
   };
 

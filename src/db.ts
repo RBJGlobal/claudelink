@@ -31,6 +31,9 @@ export interface Agent {
   checkpoint_safe_to_clear: number;
   checkpoint_handoff_path: string | null;
   checkpoint_note: string | null;
+  // Stamped only when safe_to_clear flips true (the T1 /compact consent anchor);
+  // immune to the per-turn hook touch. Null once consumed-by-fire or declined.
+  checkpoint_consent_ts: number | null;
 }
 
 export interface RegisterOptions {
@@ -210,6 +213,69 @@ export class NexusDB {
       });
       applyV4();
     }
+
+    // v5 — consent timestamp for the T1 /compact handshake. checkpoint_ts is
+    // bumped every turn by the Stop hook (the recency channel), so it can't tell
+    // us how old a safe_to_clear=true CONSENT is. checkpoint_consent_ts is
+    // stamped ONLY when an explicit signal_checkpoint(safe_to_clear=true) lands,
+    // giving the watcher a durable, hook-immune freshness anchor for firing.
+    // Additive, nullable. Rollback:
+    //   ALTER TABLE agents DROP COLUMN checkpoint_consent_ts;
+    //   PRAGMA user_version = 4;
+    if (userVersion < 5) {
+      const applyV5 = this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE agents ADD COLUMN checkpoint_consent_ts INTEGER;
+          PRAGMA user_version = 5;
+        `);
+      });
+      applyV5();
+    }
+
+    // v6 — pending manual-override trigger for the Command Center's per-terminal
+    // Compact / Clear buttons. manual_action holds "compact" | "clear" while a
+    // founder-initiated handshake is in flight (the watcher asks for consent,
+    // then fires that action and clears the column). manual_action_ts anchors
+    // the request so consent only counts if it POSTDATES the click, and so a
+    // forgotten request can expire. Additive, nullable. Rollback:
+    //   ALTER TABLE agents DROP COLUMN manual_action_ts;
+    //   ALTER TABLE agents DROP COLUMN manual_action;
+    //   PRAGMA user_version = 5;
+    if (userVersion < 6) {
+      const applyV6 = this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE agents ADD COLUMN manual_action TEXT;
+          ALTER TABLE agents ADD COLUMN manual_action_ts INTEGER;
+          PRAGMA user_version = 6;
+        `);
+      });
+      applyV6();
+    }
+  }
+
+  // Queue a founder-initiated manual /compact or /clear for an agent (set by the
+  // Command Center). The watcher picks it up on its next tick, runs the consent
+  // handshake, and clears it on fire/expiry. Stamps the request time so a stale
+  // pre-existing consent can't short-circuit the prompt. Returns false if no
+  // such agent.
+  setManualAction(agentId: string, action: "compact" | "clear"): boolean {
+    const r = this.db
+      .prepare(
+        `UPDATE agents SET manual_action = ?, manual_action_ts = ? WHERE id = ?`
+      )
+      .run(action, Date.now(), agentId);
+    return r.changes > 0;
+  }
+
+  // Clear a pending manual trigger (the watcher calls this after firing or
+  // expiring it; also used to cancel from the UI).
+  clearManualAction(agentId: string): boolean {
+    const r = this.db
+      .prepare(
+        `UPDATE agents SET manual_action = NULL, manual_action_ts = NULL WHERE id = ?`
+      )
+      .run(agentId);
+    return r.changes > 0;
   }
 
   registerAgent(
@@ -234,6 +300,30 @@ export class NexusDB {
         .get(opts.tty) as { id: string; role: string; pid: number } | undefined;
       if (existing) {
         if (isProcessAlive(existing.pid)) {
+          // SAME live process re-registering on its own TTY → this is the one
+          // agent that owns this terminal changing/refreshing its role, NOT two
+          // sessions fighting over a pane. Update in place and keep the same id
+          // so the agent's inbox + checkpoint history survive the rename. This
+          // is the in-session role-change path (no deregister tool needed); the
+          // throw below still fires for a genuinely DIFFERENT live pid.
+          if (existing.pid === pid) {
+            this.db
+              .prepare(
+                `UPDATE agents
+                    SET role = ?, description = ?, terminal_app = ?,
+                        pane_id = ?, autonomous_reply = ?
+                  WHERE id = ?`
+              )
+              .run(
+                role,
+                description,
+                opts.terminalApp,
+                opts.paneId,
+                opts.autonomousReply ? 1 : 0,
+                existing.id
+              );
+            return existing.id;
+          }
           throw new Error(
             `TTY ${opts.tty} is already registered to agent "${existing.role}" (pid ${existing.pid}). ` +
               `Deregister that agent first or open a new terminal.`
@@ -330,16 +420,19 @@ export class NexusDB {
     }));
   }
 
+  // Returns the recipients the message fanned out to (role intentionally allows
+  // duplicates — see role-collision.ts). The caller uses the list to surface the
+  // fan-out to the sender; the count is `.length`.
   sendMessage(
     fromId: string,
     toRole: string,
     content: string,
     priority: string = "normal",
     opts: SendOptions = {}
-  ): number {
+  ): { id: string; role: string; description: string | null }[] {
     const targets = this.db
-      .prepare(`SELECT id FROM agents WHERE role = ?`)
-      .all(toRole) as { id: string }[];
+      .prepare(`SELECT id, role, description FROM agents WHERE role = ?`)
+      .all(toRole) as { id: string; role: string; description: string | null }[];
 
     if (targets.length === 0) {
       throw new Error(
@@ -362,7 +455,7 @@ export class NexusDB {
     });
 
     sendAll();
-    return targets.length;
+    return targets;
   }
 
   broadcastMessage(fromId: string, content: string, opts: SendOptions = {}): void {
@@ -460,16 +553,36 @@ export class NexusDB {
     agentId: string,
     opts: { safeToClear: boolean; handoffPath: string | null; note: string | null }
   ): boolean {
+    const nowTs = Date.now();
+    // Stamp the consent anchor ONLY on an affirmative safe_to_clear; a "no"
+    // (or a re-signal that flips it false) clears it so a stale yes can't linger
+    // and later satisfy the /compact freshness gate.
+    const consentTs = opts.safeToClear ? nowTs : null;
     const r = this.db
       .prepare(
         `UPDATE agents
             SET checkpoint_ts = ?,
                 checkpoint_safe_to_clear = ?,
                 checkpoint_handoff_path = ?,
-                checkpoint_note = ?
+                checkpoint_note = ?,
+                checkpoint_consent_ts = ?
           WHERE id = ?`
       )
-      .run(Date.now(), opts.safeToClear ? 1 : 0, opts.handoffPath ?? null, opts.note ?? null, agentId);
+      .run(nowTs, opts.safeToClear ? 1 : 0, opts.handoffPath ?? null, opts.note ?? null, consentTs, agentId);
+    return r.changes > 0;
+  }
+
+  // Consume an agent's standing /compact consent after the watcher has fired
+  // (or whenever it must be invalidated). Resets safe_to_clear→0 and clears the
+  // consent anchor so ONE yes maps to exactly ONE compact — the consent can't
+  // re-fire on the next tick (post-/compact the flag would otherwise still read
+  // 1), nor after a watcher restart. Returns false if no such agent.
+  consumeCheckpointConsent(agentId: string): boolean {
+    const r = this.db
+      .prepare(
+        `UPDATE agents SET checkpoint_safe_to_clear = 0, checkpoint_consent_ts = NULL WHERE id = ?`
+      )
+      .run(agentId);
     return r.changes > 0;
   }
 
