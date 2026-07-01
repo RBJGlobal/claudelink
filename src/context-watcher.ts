@@ -315,6 +315,35 @@ export async function latestTurnEconomics(
   const rl = readline.createInterface({ input, crlfDelay: Infinity });
   try {
     for await (const line of rl) {
+      // COMPACT-BOUNDARY: a `/compact` writes a `system/compact_boundary` line
+      // carrying the real post-compact size in `compactMetadata.postTokens`, but
+      // NO `usage` line until the agent's next model turn. On an idle terminal
+      // that just compacted, the chronologically-last `usage` line is the stale
+      // pre-compact turn — so without this branch we report the pre-compact
+      // occupancy (e.g. 164K/82%) until the next turn writes a fresh usage line.
+      // Honor the boundary as the latest occupancy datum. Must be checked BEFORE
+      // the `"usage"` skip below (the boundary line carries no usage). Same
+      // latest-ts guard as usage lines, and the same treatment as the timeline
+      // reader (scanFileForTimeline). A real post-compact turn arrives with a
+      // later ts and correctly re-overrides — self-healing.
+      if (line.indexOf("compact_boundary") !== -1) {
+        try {
+          const o = JSON.parse(line);
+          if (o?.type === "system" && o?.subtype === "compact_boundary") {
+            const post = o.compactMetadata?.postTokens;
+            const cts = Date.parse(o.timestamp || "");
+            if (Number.isFinite(cts) && cts >= latestTs && post != null) {
+              latestTs = cts;
+              contextTokens = Number(post) || 0;
+              // model carries over from the last real turn — a compact cannot
+              // occur on a session with no prior model turn, so it stays valid.
+            }
+            continue;
+          }
+        } catch {
+          /* fall through to usage handling */
+        }
+      }
       if (line.indexOf('"usage"') === -1) continue;
       let o: any;
       try {

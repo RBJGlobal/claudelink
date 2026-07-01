@@ -67,6 +67,17 @@ function assistantTurn(opts: {
   };
 }
 
+// A `/compact` writes this system line; postTokens is the real post-compact
+// context size. No `usage` line follows until the agent's next model turn.
+function compactBoundary(secondsAgo: number, postTokens: number) {
+  return {
+    type: "system",
+    subtype: "compact_boundary",
+    timestamp: tsAt(secondsAgo),
+    compactMetadata: { trigger: "manual", preTokens: 165_458, postTokens },
+  };
+}
+
 // ---- latestTurnEconomics ----
 
 test("latestTurnEconomics picks the BY-TIME latest turn, not the by-position last", async () => {
@@ -93,6 +104,48 @@ test("latestTurnEconomics is unaffected by ordered-on-disk transcripts (no regre
     assistantTurn({ secondsAgo: 7200, contextTokens: 50_000 }),
     assistantTurn({ secondsAgo: 3600, contextTokens: 100_000 }),
     assistantTurn({ secondsAgo: 60, contextTokens: 200_000 }),
+  ]);
+  const econ = await latestTurnEconomics(f);
+  assert.ok(econ);
+  assert.equal(econ.contextTokens, 200_000);
+});
+
+test("latestTurnEconomics reports post-compact size when a compact_boundary is the latest event", async () => {
+  // The real-world bug: an idle terminal runs /compact. The last `usage` line
+  // is the stale pre-compact turn (164K); the compact_boundary written after it
+  // carries the true post-compact size (13.7K) but no usage line follows until
+  // the next turn. The reader must honor the boundary, not the stale usage line.
+  const f = writeTranscript("compacted-idle", [
+    assistantTurn({ secondsAgo: 300, contextTokens: 164_419 }), // pre-compact turn
+    compactBoundary(120, 13_695), // /compact ran after it, no usage line since
+  ]);
+  const econ = await latestTurnEconomics(f);
+  assert.ok(econ);
+  assert.equal(
+    econ.contextTokens,
+    13_695,
+    "must report post-compact size, not the stale pre-compact usage line"
+  );
+});
+
+test("latestTurnEconomics: a real turn after the compact re-overrides (self-healing)", async () => {
+  const f = writeTranscript("compacted-then-turn", [
+    assistantTurn({ secondsAgo: 300, contextTokens: 164_419 }),
+    compactBoundary(120, 13_695),
+    assistantTurn({ secondsAgo: 30, contextTokens: 21_000 }), // next turn post-compact
+  ]);
+  const econ = await latestTurnEconomics(f);
+  assert.ok(econ);
+  assert.equal(econ.contextTokens, 21_000);
+});
+
+test("latestTurnEconomics: an older interleaved compact_boundary does NOT override a later real turn", async () => {
+  // Branch/resume shape: a compact_boundary with an EARLIER ts sits by-position
+  // after the chronologically-latest usage turn. The latest-ts guard must keep
+  // the real 200K turn, not regress to the stale boundary's postTokens.
+  const f = writeTranscript("compact-interleaved", [
+    assistantTurn({ secondsAgo: 60, contextTokens: 200_000 }), // chronologically latest
+    compactBoundary(3600, 9_000), // older event, by-position last
   ]);
   const econ = await latestTurnEconomics(f);
   assert.ok(econ);
