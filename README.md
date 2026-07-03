@@ -293,7 +293,25 @@ npx claudelink init --all                 # all four clients in one project
 
 ### 3. Restart your terminals
 
-ClaudeLink tools appear automatically. Done.
+ClaudeLink tools appear automatically. Messaging, inbox, bulletin board, and the Command Center now work — **no permissions needed, on any terminal.**
+
+### 4. iTerm2 only — allow the one-time keystroke permission
+
+**Skip this entirely if you use tmux** (it needs zero setup) or if you only want the messaging/dashboard features (those need no permissions either). This step is only for the **autonomous keystroke layer** on **iTerm2** — the auto-nudge "check your inbox" pokes, auto-compact, and the Command Center's **Compact / Clear** buttons.
+
+Those work by having ClaudeLink's background watcher send iTerm2 standard **Apple Events** (the same public scripting API a `osascript` one-liner uses — no Accessibility, no kernel extensions). The first time it does, macOS asks for consent:
+
+> **"… wants to control iTerm2."** → click **OK**. That's it.
+
+Because the watcher runs in the background, you might not catch that prompt. If autonomous nudges/compaction never fire in iTerm2, grant it manually — it takes 15 seconds:
+
+1. Open **System Settings → Privacy & Security → Automation**
+2. Find the entry for your terminal (or `osascript`)
+3. Toggle **iTerm2** on
+
+To confirm it's working, watch `~/.claudelink/scheduler.log` / `~/.claudelink/context-watcher.log` — a landed keystroke logs `result=ok`; a blocked one logs `result=fail` or `skip`.
+
+*(Apple Terminal is unsupported because it would instead require an Accessibility grant, which ClaudeLink deliberately won't silently prompt for — use tmux or iTerm2.)*
 
 ### Multi-model support
 
@@ -308,7 +326,7 @@ ClaudeLink is built to disappear into your dev environment, not become another S
 - **No account, no signup, no API key.** ClaudeLink doesn't talk to any external service. The agents talk to their own LLM providers however they normally would; ClaudeLink is just the connective tissue between *them*.
 - **Loopback by default.** The Command Center binds to `127.0.0.1:7878`. It's not reachable from outside your machine unless you explicitly opt in (planned for the v1.2 multi-machine release with bearer-token auth on a LAN bind).
 - **Fully open source.** MIT licensed. Every line of code is in this repo. Code is auditable, forkable, and you can run a custom build for your enterprise's compliance posture.
-- **Sandboxed terminal interaction.** The auto-nudge scheduler types into iTerm2 / tmux through their public AppleScript / send-keys APIs — the same way a Bash script would. No accessibility shims, no kernel hooks, no permission prompts.
+- **Sandboxed terminal interaction.** The auto-nudge scheduler types into iTerm2 / tmux through their public AppleScript / send-keys APIs — the same way a Bash script would. No accessibility shims, no kernel hooks. tmux needs no permissions at all; iTerm2 uses standard macOS **Automation** (Apple Events), so you may get a one-time "*allow control of iTerm2*" consent — [see the setup step](#4-iterm2-only--allow-the-one-time-keystroke-permission). Messaging, inbox, and the Command Center need no permissions on any terminal.
 
 If you've been hesitant to wire AI agents together because every "multi-agent framework" wants you to send your context to their cloud, ClaudeLink is built for you. Your code stays where it is.
 
@@ -316,6 +334,7 @@ If you've been hesitant to wire AI agents together because every "multi-agent fr
 - Node.js 18+
 - One or more MCP-compatible clients: Claude Code, OpenAI Codex CLI, Google Gemini CLI, or Block's Goose
 - macOS or Linux (Windows works for messaging; auto-nudge requires tmux)
+- **For the autonomous keystroke layer on macOS:** tmux works with zero setup; iTerm2 needs a one-time Automation permission ([step 4 below](#4-iterm2-only--allow-the-one-time-keystroke-permission)). Messaging + the Command Center need no permissions on any terminal.
 
 ---
 
@@ -430,8 +449,10 @@ The scheduler is **smart**: the SQL filter only nudges terminals with unread mai
 | Terminal | Mechanism | Permissions |
 |---|---|---|
 | **tmux** | `tmux send-keys -t <pane>` | none |
-| **iTerm2** | `osascript` matched by tty | none |
+| **iTerm2** | `osascript` matched by tty | one-time macOS **Automation** grant ([setup](#4-iterm2-only--allow-the-one-time-keystroke-permission)) |
 | **Apple Terminal** | unsupported (would need Accessibility) | not silently prompted |
+
+> This permission applies **only** to the autonomous keystroke layer (auto-nudge, auto-compact, the Command Center's Compact/Clear buttons). Plain messaging, `read_inbox`, and the dashboard work on any terminal with no permissions. Running inside **tmux** avoids the iTerm2 grant entirely.
 
 When the keystroke arrives, the receiving CLI treats it as normal user input and the agent calls `read_inbox` via its own tool — fully trusted path. **This works identically for Claude Code, Codex CLI, Gemini CLI, and Goose** because the keystroke is the lowest common denominator every terminal app handles the same.
 
