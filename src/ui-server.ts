@@ -37,6 +37,7 @@ import {
 } from "./usage-reader.js";
 import { verifyHandoff } from "./compact-executor.js";
 import { buildPromptClearText } from "./prompt-clear.js";
+import { QUOTA_PATH } from "./usage-proxy.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DEFAULT_DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -732,6 +733,40 @@ const HTML = String.raw`<!doctype html>
 <main>
  <div class="tab-content active" id="tab-overview">
   <div class="grid">
+  <style>
+    .plan-usage-grid { display:flex; gap:24px; flex-wrap:wrap; }
+    .plan-meter { flex:1; min-width:220px; }
+    .plan-meter-head { display:flex; justify-content:space-between; align-items:baseline; font-size:13px; color:var(--muted); margin-bottom:6px; }
+    .plan-meter-head b { color:var(--fg); font-size:20px; font-variant-numeric:tabular-nums; }
+    .plan-bar { height:10px; border-radius:6px; background:rgba(127,127,127,0.18); overflow:hidden; }
+    .plan-bar-fill { height:100%; width:0%; border-radius:6px; background:#3fb950; transition:width .4s ease; }
+    .plan-bar-fill.warn { background:#d29922; }
+    .plan-bar-fill.danger { background:#f85149; }
+    .plan-meter-sub { font-size:12px; color:var(--muted); margin-top:6px; }
+  </style>
+  <section class="panel full" id="plan-usage-panel" style="display:none">
+    <h2>Plan Usage <span class="count" id="plan-binding">—</span></h2>
+    <div class="body">
+      <div class="plan-usage-grid">
+        <div class="plan-meter">
+          <div class="plan-meter-head"><span>Session · 5-hour window</span><b id="plan-5h-pct">—</b></div>
+          <div class="plan-bar"><div class="plan-bar-fill" id="plan-5h-bar"></div></div>
+          <div class="plan-meter-sub" id="plan-5h-reset">—</div>
+        </div>
+        <div class="plan-meter">
+          <div class="plan-meter-head"><span>Weekly</span><b id="plan-7d-pct">—</b></div>
+          <div class="plan-bar"><div class="plan-bar-fill" id="plan-7d-bar"></div></div>
+          <div class="plan-meter-sub" id="plan-7d-reset">—</div>
+        </div>
+        <div class="plan-meter" id="plan-fable-meter" style="display:none">
+          <div class="plan-meter-head"><span>Fable · weekly pool</span><b id="plan-fable-pct">—</b></div>
+          <div class="plan-bar"><div class="plan-bar-fill" id="plan-fable-bar"></div></div>
+          <div class="plan-meter-sub" id="plan-fable-reset">—</div>
+        </div>
+      </div>
+      <p class="nudge-hint" id="plan-usage-foot">—</p>
+    </div>
+  </section>
   <section class="panel full">
     <h2>Health</h2>
     <div class="body">
@@ -868,7 +903,7 @@ const HTML = String.raw`<!doctype html>
       <div class="usage-trend" id="usage-trend"></div>
       <div id="usage-projects"></div>
       <p class="nudge-hint">
-        Reads each live agent's local Claude Code transcript and totals real token usage per project and per model. Counts are exact (input / output / cache), deduped across forked sessions. The dollar figure is <em>API-equivalent value at list price</em> — on a Max plan you pay a flat fee, so it shows how much consumption the subscription is buying, not a bill. Shows consumption, not your plan's weekly quota ceiling (that's server-side and not exposed locally). <strong>Compact opportunity</strong> = an upper-bound estimate of the cache-read tokens that compacting over-threshold sessions could avoid re-reading — the fixable slice the context-hygiene watcher targets (the real soak measures the actual delta). Read-only — never writes transcripts or touches terminals.
+        Reads each live agent's local Claude Code transcript and totals real token usage per project and per model. Counts are exact (input / output / cache), deduped across forked sessions. The dollar figure is <em>API-equivalent value at list price</em> — on a Max plan you pay a flat fee, so it shows how much consumption the subscription is buying, not a bill. Shows consumption, not your plan's weekly quota ceiling — for that (session % + weekly % + reset clocks), turn on the opt-in Plan Usage meter (<span class="mono">claudelink usage --on</span>); its tile is on the Overview tab. <strong>Compact opportunity</strong> = an upper-bound estimate of the cache-read tokens that compacting over-threshold sessions could avoid re-reading — the fixable slice the context-hygiene watcher targets (the real soak measures the actual delta). Read-only — never writes transcripts or touches terminals.
       </p>
     </div>
   </section>
@@ -1513,6 +1548,58 @@ async function loadTimeline() {
 loadTimeline();
 setInterval(loadTimeline, 120000);
 
+// --- Plan Usage tile (subscription session/weekly meter) ---
+// Reads /api/quota (backed by the opt-in usage proxy's ~/.claudelink/quota.json).
+// Dormant: the panel stays hidden until there's captured data.
+function fmtResetIn(resetEpoch, nowMs) {
+  if (resetEpoch == null) return "reset time unknown";
+  const secs = resetEpoch - Math.floor(nowMs / 1000);
+  if (secs <= 0) return "resetting now";
+  const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+  return "resets in " + (d > 0 ? d + "d " + h + "h" : h + "h " + String(m).padStart(2, "0") + "m");
+}
+function setPlanMeter(pctEl, barEl, subEl, data, nowMs) {
+  if (!data) { pctEl.textContent = "—"; barEl.style.width = "0%"; subEl.textContent = "not reported"; return; }
+  const u = data.utilization == null ? null : Math.round(data.utilization * 100);
+  pctEl.textContent = u == null ? "?%" : u + "%";
+  barEl.style.width = (u == null ? 0 : Math.min(100, u)) + "%";
+  barEl.className = "plan-bar-fill" + (u != null && u >= 90 ? " danger" : (u != null && u >= 75 ? " warn" : ""));
+  subEl.textContent = fmtResetIn(data.resetEpoch, nowMs);
+}
+async function loadQuota() {
+  let q;
+  try { q = await (await fetch("/api/quota")).json(); } catch { return; }
+  const panel = $("plan-usage-panel");
+  if (!q || !q.present) { panel.style.display = "none"; return; }
+  panel.style.display = "";
+  const now = q.serverNowMs || Date.now();
+  setPlanMeter($("plan-5h-pct"), $("plan-5h-bar"), $("plan-5h-reset"), q.session, now);
+  setPlanMeter($("plan-7d-pct"), $("plan-7d-bar"), $("plan-7d-reset"), q.weekly, now);
+  // Fable weekly pool — only present after a Fable request; carried forward with
+  // its own timestamp, so it shows an independent "as of".
+  const fableMeter = $("plan-fable-meter");
+  if (q.fable) {
+    fableMeter.style.display = "";
+    setPlanMeter($("plan-fable-pct"), $("plan-fable-bar"), $("plan-fable-reset"), q.fable, now);
+    const fAgeMin = Math.round((now - q.fable.capturedAtMs) / 60000);
+    $("plan-fable-reset").textContent += " · as of " + fAgeMin + "m ago";
+  } else {
+    fableMeter.style.display = "none";
+  }
+  const bindLabel = q.binding === "five_hour" ? "session is the active limit"
+    : q.binding === "seven_day" ? "weekly is the active limit"
+    : (q.binding || "");
+  $("plan-binding").textContent = bindLabel;
+  const ageMin = Math.round((now - q.capturedAtMs) / 60000);
+  const stale = ageMin >= 10;
+  $("plan-usage-foot").innerHTML =
+    "As of " + new Date(q.capturedAtMs).toLocaleTimeString() + " (" + ageMin + "m ago)"
+    + (stale ? " — <strong>stale</strong>; refreshes on your next Claude Code request through the proxy" : "")
+    + ". Local-only, read from ~/.claudelink/quota.json — never leaves this machine.";
+}
+loadQuota();
+setInterval(loadQuota, 30000);
+
 // --- Project expand (+) → per-session / per-agent breakdown ---
 $("usage-projects").addEventListener("click", (e) => {
   const btn = e.target.closest(".proj-expand");
@@ -1804,6 +1891,17 @@ export function startUIServer(port = 7878): http.Server {
           (e: any) => send(500, { error: e?.message ?? String(e) })
         );
         return;
+      }
+      if (req.method === "GET" && p === "/api/quota") {
+        // Subscription session/weekly meter. Reads the local quota.json written
+        // by the opt-in usage proxy. Absent file => dormant (tile hidden).
+        let rec: any = null;
+        try {
+          rec = JSON.parse(fs.readFileSync(QUOTA_PATH, "utf-8"));
+        } catch {
+          /* no data — proxy not running or no request captured yet */
+        }
+        return send(200, rec ? { present: true, serverNowMs: Date.now(), ...rec } : { present: false });
       }
       if (req.method === "GET" && p === "/api/agent-timeline") {
         getAgentTimelines().then(

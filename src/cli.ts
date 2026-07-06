@@ -3,6 +3,12 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import {
+  QUOTA_PATH,
+  PROXY_LOCK_PATH,
+  DEFAULT_PROXY_PORT,
+  type QuotaRecord,
+} from "./usage-proxy.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 
@@ -515,6 +521,13 @@ function showHelp() {
     install-hooks              Install Stop + UserPromptSubmit hooks for autonomous replies (project)
     install-hooks --global     Install hooks in ~/.claude/settings.json (all projects)
     install-hooks --uninstall  Remove ClaudeLink hooks from the chosen scope
+    usage [--on|--off]         Personal, local-only subscription usage meter.
+                               --on starts a transparent localhost proxy that
+                               reads your Pro/Max session + weekly limits off
+                               your own Claude Code traffic (opt-in; forwards
+                               your auth token untouched, never logs it). No
+                               args shows current status. See the Command
+                               Center for the live tile.
     reset                      Clear all messages and agent registrations
     prompt-clear [--agent X]   Emit a paste-ready "your context is high" prompt
                                with each live agent's current measured numbers
@@ -898,6 +911,209 @@ async function promptClearCommand(targetRole: string | null): Promise<void> {
   }
 }
 
+// --- `claudelink usage` — subscription session/weekly usage widget ---------
+// Opt-in, personal, local-only. Starts a transparent localhost proxy that
+// scrapes the anthropic-ratelimit-unified-* response headers off your own
+// Claude Code traffic into ~/.claudelink/quota.json, which the Command Center
+// renders. Nothing here is active until you run it — a fresh install never
+// routes any traffic through the proxy. See src/usage-proxy.ts for the auth-
+// path security contract (token is forwarded untouched, never logged).
+
+interface ProxyLock {
+  pid: number;
+  port: number;
+  startedAt?: string;
+}
+
+function readProxyLock(): ProxyLock | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(PROXY_LOCK_PATH, "utf-8"));
+    if (typeof raw?.pid === "number") return raw as ProxyLock;
+  } catch {
+    /* no/invalid lock */
+  }
+  return null;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function runningProxy(): ProxyLock | null {
+  const lock = readProxyLock();
+  if (lock && pidAlive(lock.pid)) return lock;
+  // stale lock — clean it up so --on can restart cleanly
+  if (lock) {
+    try {
+      fs.unlinkSync(PROXY_LOCK_PATH);
+    } catch {}
+  }
+  return null;
+}
+
+function baseUrlLine(port: number): string {
+  return `export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}`;
+}
+
+function printWiringHelp(port: number) {
+  console.log(`
+  To route your Claude Code traffic through the meter, export this in the
+  shell BEFORE launching Claude Code (recommended — scoped to that terminal):
+
+    ${baseUrlLine(port)}
+
+  The proxy forwards every request to api.anthropic.com untouched — your auth
+  token is never read or logged; only the rate-limit response headers are
+  captured. It only sees traffic while it's running AND that env var is set.
+
+  ⚠  IMPORTANT — do NOT bake ANTHROPIC_BASE_URL into ~/.claude/settings.json
+     unless you also run this proxy as a login item. That env block is global
+     and persistent: if the proxy is ever down (crash, reboot, or you forgot
+     --off), EVERY Claude Code session will hang on connection-refused with no
+     obvious hint that this is the cause. The shell export above limits the
+     blast radius to one terminal, which you can just close.
+
+  Turn it off any time with:  claudelink usage --off   (then unset the env var)
+`);
+}
+
+function usageOn(port: number) {
+  const existing = runningProxy();
+  if (existing) {
+    console.log(`  Usage meter proxy already running (pid ${existing.pid}, port ${existing.port}).`);
+    printWiringHelp(existing.port);
+    return;
+  }
+
+  const proxyPath = path.join(__dirname, "usage-proxy.js");
+  if (!fs.existsSync(proxyPath)) {
+    console.log(`  Could not find the proxy at ${proxyPath}. Run 'npm run build' first.`);
+    return;
+  }
+
+  if (!fs.existsSync(NEXUS_DIR)) fs.mkdirSync(NEXUS_DIR, { recursive: true });
+  const logPath = path.join(NEXUS_DIR, "quota-proxy.log");
+  const out = fs.openSync(logPath, "a");
+  const { spawn } = require("child_process");
+  const child = spawn(process.execPath, [proxyPath, String(port)], {
+    detached: true,
+    stdio: ["ignore", out, out],
+  });
+  child.unref();
+
+  console.log(`  Usage meter proxy started (pid ${child.pid}, port ${port}).`);
+  console.log(`  Log: ${logPath}`);
+  console.log(`  Data: ${QUOTA_PATH} (localhost-only; never leaves this machine)`);
+  printWiringHelp(port);
+}
+
+function usageOff() {
+  const lock = readProxyLock();
+  if (!lock) {
+    console.log("  Usage meter proxy is not running.");
+    return;
+  }
+  if (pidAlive(lock.pid)) {
+    try {
+      process.kill(lock.pid, "SIGTERM");
+      console.log(`  Stopped usage meter proxy (pid ${lock.pid}).`);
+    } catch (e: any) {
+      console.log(`  Could not stop pid ${lock.pid}: ${e?.message ?? e}`);
+      return;
+    }
+  } else {
+    console.log("  Usage meter proxy was not running (cleaned up stale lock).");
+  }
+  try {
+    fs.unlinkSync(PROXY_LOCK_PATH);
+  } catch {}
+  console.log(`  Remember to unset the env var:  unset ANTHROPIC_BASE_URL`);
+  console.log(
+    `  If you added ANTHROPIC_BASE_URL to ~/.claude/settings.json, REMOVE it there\n  too — otherwise new Claude Code sessions will hang trying to reach the now-\n  stopped proxy.`
+  );
+}
+
+function fmtCountdown(resetEpoch: number | null): string {
+  if (resetEpoch == null) return "unknown";
+  const secs = resetEpoch - Math.floor(Date.now() / 1000);
+  if (secs <= 0) return "due now";
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return d > 0 ? `${d}d ${h}h` : `${h}h ${String(m).padStart(2, "0")}m`;
+}
+
+function pct(u: number | null): string {
+  return u == null ? "  ?%" : `${Math.round(u * 100)}%`;
+}
+
+function usageStatus() {
+  const running = runningProxy();
+  console.log(`\n  Usage meter`);
+  console.log(`  ───────────`);
+  console.log(
+    running
+      ? `  Proxy:   RUNNING (pid ${running.pid}, port ${running.port})`
+      : `  Proxy:   stopped   (start with: claudelink usage --on)`
+  );
+
+  let rec: QuotaRecord | null = null;
+  try {
+    rec = JSON.parse(fs.readFileSync(QUOTA_PATH, "utf-8"));
+  } catch {
+    /* no data yet */
+  }
+  if (!rec) {
+    console.log(
+      `  Data:    none yet (${QUOTA_PATH})\n\n  Once the proxy is running and ANTHROPIC_BASE_URL points at it, the\n  numbers appear after your next Claude Code request.\n`
+    );
+    return;
+  }
+
+  const ageMin = Math.round((Date.now() - rec.capturedAtMs) / 60000);
+  console.log(`  As of:   ${rec.capturedAt} (${ageMin}m ago)`);
+  if (rec.overallStatus) console.log(`  Status:  ${rec.overallStatus}`);
+  if (rec.session)
+    console.log(
+      `  Session: ${pct(rec.session.utilization).padStart(4)} used  · resets in ${fmtCountdown(
+        rec.session.resetEpoch
+      )}`
+    );
+  if (rec.weekly)
+    console.log(
+      `  Weekly:  ${pct(rec.weekly.utilization).padStart(4)} used  · resets in ${fmtCountdown(
+        rec.weekly.resetEpoch
+      )}`
+    );
+  if (rec.fable) {
+    const fAge = Math.round((Date.now() - rec.fable.capturedAtMs) / 60000);
+    console.log(
+      `  Fable:   ${pct(rec.fable.utilization).padStart(4)} used  · resets in ${fmtCountdown(
+        rec.fable.resetEpoch
+      )}  (weekly pool, as of ${fAge}m ago)`
+    );
+  }
+  if (rec.binding) console.log(`  Binding: ${rec.binding}`);
+  console.log();
+}
+
+function usageCommand(args: string[]) {
+  const portIdx = args.indexOf("--port");
+  const port =
+    portIdx >= 0 && portIdx + 1 < args.length
+      ? Number(args[portIdx + 1]) || DEFAULT_PROXY_PORT
+      : DEFAULT_PROXY_PORT;
+
+  if (args.includes("--off") || args.includes("stop")) return usageOff();
+  if (args.includes("--on") || args.includes("start")) return usageOn(port);
+  return usageStatus();
+}
+
 function resetDB() {
   const dbPath = path.join(NEXUS_DIR, "nexus.db");
   if (fs.existsSync(dbPath)) {
@@ -960,6 +1176,9 @@ switch (command) {
       args.includes("--global") ? "global" : "project",
       args.includes("--uninstall")
     );
+    break;
+  case "usage":
+    usageCommand(args.slice(1));
     break;
   case "reset":
     resetDB();
