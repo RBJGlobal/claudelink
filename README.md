@@ -352,6 +352,7 @@ The Command Center is a local web UI at `http://127.0.0.1:7878` — a live conso
 | **Auto-nudge** | Global on/off + tick interval (1–120 min). Scheduler only fires for terminals that *actually have* unread mail — no wasted Claude turns. |
 | **Recovery Watcher** *(v1.4.0+)* | Detects Anthropic API rate-limit / overload errors in agent terminals and types a recovery prompt automatically. Configurable poll interval, cooldown, and escalate-to-desktop-notification threshold. See [Recovery Watcher](#3-recovery-watcher-api-error-auto-recovery) below. |
 | **Fleet — live context** *(v1.5.0+)* | Per-agent context occupancy, $/turn, handoff freshness and last-signal age, sorted most-urgent-first. Per-row **Copy prompt**, **Compact**, and **Clear** — an on-demand, consent-gated handshake to act on a heavy terminal. See [Fleet live context](#fleet-live-context--on-demand-compaction-v150) below. |
+| **Plan Usage** *(v1.6.0+, opt-in)* | Your Claude subscription's real quota — session (5-hour), weekly, and frontier-model weekly pool — as live meters with reset countdowns, without opening Claude Desktop → Settings. Off by default; `claudelink usage --on` to enable. See [Plan Usage meter](#plan-usage-meter--see-your-subscription-quota-v160-opt-in) below. |
 | **Recent messages** | Live feed of the last several messages across all agents, with priority and unread badges. |
 
 The page auto-refreshes every 2 seconds. **Kill all servers** in the header drops the entire mesh in one click.
@@ -397,6 +398,37 @@ Agents opt into the protection by calling `signal_checkpoint` at natural rest po
 
 ---
 
+## Plan Usage meter — see your subscription quota *(v1.6.0, opt-in)*
+
+Running a fleet of agents spends your Claude subscription quota fast — and the only built-in way to see where you stand (the 5-hour session window, the weekly ceiling, the separate weekly pool some plans have for the newest frontier model) is buried in Claude Desktop → Settings → Usage. When you're pacing six terminals against a limit that resets at 4 a.m., that's not a workflow.
+
+The **Plan Usage** tile on the Command Center's Overview tab shows three live meters — **Session (5h)**, **Weekly (7d)**, and the **frontier-model weekly pool** — each with utilization %, a color ramp as you approach the limit, and a countdown to its reset. Off by default; nothing runs until you opt in:
+
+```bash
+claudelink usage --on     # start the local passthrough proxy (127.0.0.1:8788)
+claudelink usage          # status: proxy state + last capture
+claudelink usage --off    # stop it
+```
+
+**How it works.** The command starts a transparent passthrough proxy on `127.0.0.1:8788`. Point a terminal's `ANTHROPIC_BASE_URL` at it and every response coming back from `api.anthropic.com` — which already carries `anthropic-ratelimit-unified-*` headers describing your plan's real windows — gets its rate-limit headers scraped into `~/.claudelink/quota.json`. The Command Center reads that file and renders the meters. That's the whole trick: the data was in every response all along; ClaudeLink just makes it visible.
+
+Wire a terminal per-shell, ephemerally:
+
+```bash
+ANTHROPIC_BASE_URL="http://127.0.0.1:8788" claude
+```
+
+> **Do not** bake `ANTHROPIC_BASE_URL` into `~/.claude/settings.json` or your shell profile. If the proxy isn't running, every session pointed at it hangs on connection-refused. An ephemeral per-shell export (or a small shell function that checks the proxy is alive first) fails safe.
+
+**Security contract** — this is an auth-path component, so the rules are strict and the code is short enough to audit in one sitting:
+
+- Your auth token is **forwarded verbatim, never read, parsed, or logged**.
+- Only **response** rate-limit headers are captured — request and response bodies pass through untouched.
+- Binds to `127.0.0.1` only. Fail-open: if header parsing ever breaks, your traffic still flows.
+- **Default OFF.** No proxy process exists until you run `claudelink usage --on`.
+
+---
+
 ## Available tools
 
 Once connected, every agent session — Claude Code, Codex CLI, Gemini CLI, Goose, or any other MCP client — gains these MCP tools:
@@ -427,6 +459,9 @@ claudelink ui --stop                  # stop the Command Center
 claudelink install-hooks              # install autonomous-reply hooks (project)
 claudelink install-hooks --global     # install hooks in ~/.claude/settings.json
 claudelink install-hooks --uninstall  # remove ClaudeLink hooks
+claudelink usage --on                 # start the Plan Usage quota proxy (opt-in)
+claudelink usage                      # quota proxy status + last capture
+claudelink usage --off                # stop the quota proxy
 claudelink reset                      # clear all data (fresh start)
 claudelink help                       # full help
 ```
