@@ -6,9 +6,11 @@
 
 ## Model selection policy
 
-**Default Sonnet 4.6.** Escalate to **Opus 4.7** for: protocol design changes (MCP server contract, hooks contract, message-routing semantics), multi-process race-condition reasoning, security-relevant work (auth tokens, scope validation, untrusted-message handling). Infrastructure CRUD, scaffolding, deployment work, CLI development run Sonnet. Subagent Explore + Plan default Sonnet.
+*(Re-tiered 2026-07-19, operator-approved.)* **Default Sonnet 5** — infra maintenance, CRUD, scaffolding, deployment, CLI work. Escalate to **Opus 4.8** for: the **checkpoint / auto-compact gating logic** (a wrong gate can clobber another agent's work — high blast radius), and any **security-relevant change** (auth tokens, scope validation, untrusted-message handling, the usage-proxy auth path). Fable 5 is not needed for this seat. The base model is set at the terminal by the operator; this policy states the recommended setting, not a self-switch.
 
-*Iterative; advisor tunes over the first 3-4 days. If you escalate to Opus mid-task on something the policy says is Sonnet, capture for the next calibration pass.*
+**Subagent tiers:** Explore / Plan → **Sonnet 5**. code-reviewer / security-review → **Opus 4.8**.
+
+*Iterative; if you escalate on something the policy says is Sonnet, capture it for the next calibration pass.*
 
 ## Project layout
 
