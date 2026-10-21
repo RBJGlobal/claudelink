@@ -16,6 +16,8 @@ ClaudeLink is an open-source [MCP](https://modelcontextprotocol.io/) server that
 
 You don't need to invent a multi-agent framework. You already have one.
 
+> **Recommended terminal: [iTerm2](https://iterm2.com) (macOS).** ClaudeLink is developed and tested in iTerm2. Running several agents side by side works best with its split panes and tabs, and the autonomous features are built around it. tmux is supported but less tested. Apple Terminal is not recommended and has not been tested.
+
 ---
 
 ## Why ClaudeLink exists
@@ -66,7 +68,7 @@ A single Goose terminal in your mesh can speak to whatever provider you point it
 
 This means **ClaudeLink isn't really "Claude" anymore** — it's the coordination plane, and the model space below it is essentially open. Want a Llama-3 reviewer running locally via Ollama, a Claude Sonnet implementer for hard reasoning, and a Groq-powered Llama for fast scaffolding? Spin up three Goose terminals (or a Goose + a Claude Code + a Codex), hand each one its role, and they share the same SQLite mesh. Pick the model for the job, on a per-agent basis, with no ClaudeLink-side configuration.
 
-> **What's the catch?** The auto-nudge layer that types `check for updates` into a terminal needs the CLI to be running in iTerm2 or tmux on macOS / Linux. Apple Terminal isn't supported (Accessibility permission we don't want to silently ask for). MCP messaging itself works regardless of terminal.
+> **What's the catch?** The auto-nudge layer that types `check for updates` into a terminal needs the CLI to be running in iTerm2 (recommended, tested) or tmux (supported, less tested) on macOS / Linux. Apple Terminal isn't supported (Accessibility permission we don't want to silently ask for). MCP messaging itself works regardless of terminal.
 
 Beyond the four flagged CLIs, **any MCP-compatible client can join** — point its MCP config at `claudelink-server`, add a copy of the multi-agent instructions to its project-instructions file. Roll your own and want a `--<your-cli>` flag? Open a PR with the install path; it's roughly an hour of work to add one.
 
@@ -293,7 +295,7 @@ ClaudeLink tools appear automatically. Messaging, inbox, bulletin board, and the
 
 ### 4. iTerm2 only — allow the one-time keystroke permission
 
-**Skip this entirely if you use tmux** (it needs zero setup) or if you only want the messaging/dashboard features (those need no permissions either). This step is only for the **autonomous keystroke layer** on **iTerm2** — the auto-nudge "check your inbox" pokes, auto-compact, and the Command Center's **Compact / Clear** buttons.
+**Skip this if you use tmux** (it needs no setup, though it is less tested than iTerm2) or if you only want the messaging/dashboard features (those need no permissions either). This step is only for the **autonomous keystroke layer** on **iTerm2** — the auto-nudge "check your inbox" pokes, auto-compact, and the Command Center's **Compact / Clear** buttons.
 
 Those work by having ClaudeLink's background watcher send iTerm2 standard **Apple Events** (the same public scripting API a `osascript` one-liner uses — no Accessibility, no kernel extensions). The first time it does, macOS asks for consent:
 
@@ -330,7 +332,7 @@ If you've been hesitant to wire AI agents together because every "multi-agent fr
 - Node.js 18+
 - One or more MCP-compatible clients: Claude Code, OpenAI Codex CLI, Google Gemini CLI, or Block's Goose
 - macOS or Linux (Windows works for messaging; auto-nudge requires tmux)
-- **For the autonomous keystroke layer on macOS:** tmux works with zero setup; iTerm2 needs a one-time Automation permission ([step 4 below](#4-iterm2-only--allow-the-one-time-keystroke-permission)). Messaging + the Command Center need no permissions on any terminal.
+- **Terminal: iTerm2 recommended.** It is what ClaudeLink is developed and tested in, and it needs a one-time Automation permission for the autonomous keystroke layer ([step 4 below](#4-iterm2-only--allow-the-one-time-keystroke-permission)). tmux also works with no setup, but is less tested. Messaging + the Command Center need no permissions on any terminal.
 
 ---
 
@@ -479,11 +481,11 @@ The scheduler is **smart**: the SQL filter only nudges terminals with unread mai
 
 | Terminal | Mechanism | Permissions |
 |---|---|---|
-| **tmux** | `tmux send-keys -t <pane>` | none |
-| **iTerm2** | `osascript` matched by tty | one-time macOS **Automation** grant ([setup](#4-iterm2-only--allow-the-one-time-keystroke-permission)) |
+| **iTerm2** (recommended, tested) | `osascript` matched by tty | one-time macOS **Automation** grant ([setup](#4-iterm2-only--allow-the-one-time-keystroke-permission)) |
+| **tmux** (supported, less tested) | `tmux send-keys -t <pane>` | none |
 | **Apple Terminal** | unsupported (would need Accessibility) | not silently prompted |
 
-> This permission applies **only** to the autonomous keystroke layer (auto-nudge, auto-compact, the Command Center's Compact/Clear buttons). Plain messaging, `read_inbox`, and the dashboard work on any terminal with no permissions. Running inside **tmux** avoids the iTerm2 grant entirely.
+> This permission applies **only** to the autonomous keystroke layer (auto-nudge, auto-compact, the Command Center's Compact/Clear buttons). Plain messaging, `read_inbox`, and the dashboard work on any terminal with no permissions. Running inside **tmux** avoids the iTerm2 grant entirely, though tmux is less tested than iTerm2.
 
 When the keystroke arrives, the receiving CLI treats it as normal user input and the agent calls `read_inbox` via its own tool — fully trusted path. **This works identically for Claude Code, Codex CLI, Gemini CLI, and Goose** because the keystroke is the lowest common denominator every terminal app handles the same.
 
@@ -775,7 +777,7 @@ If you'd like a one-command `--<your-cli>` flag, [open an issue](https://github.
 
 ### Does this work on Windows?
 
-Messaging works on any platform with Node 18+. The auto-nudge scheduler currently dispatches to tmux and iTerm2 only; on Windows you'd run inside WSL + tmux for the full autonomous loop.
+Messaging works on any platform with Node 18+. The auto-nudge scheduler currently dispatches to tmux and iTerm2 only; on Windows you'd run inside WSL + tmux for the full autonomous loop (untested).
 
 ---
 
