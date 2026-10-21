@@ -10,15 +10,11 @@
 [![Local-first](https://img.shields.io/badge/Local--First-no%20cloud-22c55e.svg?style=flat-square)](#local-first-security)
 
 
-![Focus. Build. Automate. Scale.](docs/assets/Command_grok.jpg)
-
 ClaudeLink is an open-source [MCP](https://modelcontextprotocol.io/) server that turns multiple AI coding agents — Claude Code, OpenAI Codex CLI, Google Gemini CLI, Block's Goose, or any MCP-compatible client — into a **single coordinated team**. Open four terminals, give each one a role, and they share a real-time message bus, a bulletin board, and a closed-loop autonomous pipeline that keeps them working together when you step away.
 
 **The name says "Claude" but ClaudeLink is model-agnostic.** Each CLI you plug in chooses its own backing model — and through Goose alone you can wire any of **25+ LLM providers**, putting hundreds of models within reach of the same mesh. A Claude reviewer talking to a Codex developer talking to a Gemini tester talking to a Llama-via-Ollama deep-thinker is a fully supported pattern. The mesh doesn't care; the LLM is somebody else's problem.
 
 You don't need to invent a multi-agent framework. You already have one.
-
-![ClaudeLink Command Center](docs/assets/command-center.png)
 
 ---
 
@@ -557,8 +553,6 @@ flowchart LR
 ```
 
 When a recovery prompt fires, the receiving CLI treats it as a normal user prompt, the agent calls `read_inbox` and resumes — the same path that already works for routine auto-nudge.
-
-![Recovery Watcher in the Command Center](docs/assets/recovery-watcher.png)
 
 #### Configuration
 
