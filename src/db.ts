@@ -97,7 +97,13 @@ export class NexusDB {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    this.db = new Database(dbPath);
+    try {
+      this.db = new Database(dbPath);
+    } catch (err) {
+      const hint = explainSqliteLoadError(err);
+      if (hint) throw new Error(hint);
+      throw err;
+    }
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 5000");
 
@@ -657,4 +663,33 @@ export class NexusDB {
   close(): void {
     this.db.close();
   }
+}
+
+
+// The SQLite driver ships a native addon that is fetched or compiled by an
+// install script. npm 11.19+ blocks dependency install scripts by default, so
+// a plain `npm install -g claudelink` can complete "successfully" with no
+// addon, and the server then dies on the first `new Database()` with an
+// opaque "Could not locate the bindings file". The same class of failure hits
+// after switching Node versions (ABI mismatch). Turn both into an actionable
+// message, because the MCP client only surfaces stderr in a log the user has
+// to go looking for.
+export function explainSqliteLoadError(err: unknown): string | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: string } | null)?.code;
+  const missing = /Could not locate the bindings file/i.test(msg);
+  const abi =
+    code === "ERR_DLOPEN_FAILED" ||
+    /NODE_MODULE_VERSION|compiled against a different Node\.js version/i.test(msg);
+  if (!missing && !abi) return null;
+  const why = missing
+    ? "ClaudeLink's SQLite driver (better-sqlite3) was installed without its native addon. npm 11.19+ skips dependency install scripts unless you allow them."
+    : "ClaudeLink's SQLite driver (better-sqlite3) was built for a different Node.js version than the one running now.";
+  return (
+    `${why}\n` +
+    "Fix: reinstall with the driver's build script allowed:\n" +
+    "  npm install -g claudelink --allow-scripts=better-sqlite3\n" +
+    "Then reconnect the claudelink MCP server in your AI client.\n" +
+    `(original error: ${msg})`
+  );
 }

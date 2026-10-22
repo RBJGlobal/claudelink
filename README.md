@@ -245,8 +245,17 @@ Within a minute the reviewer's reply lands in terminal 2, the developer acts on 
 
 ### 1. Install the package
 ```bash
-npm install -g claudelink
+npm install -g claudelink --allow-scripts=better-sqlite3
 ```
+
+> **Why the flag?** ClaudeLink stores its shared state in SQLite through `better-sqlite3`, which installs a native addon with an install script. **npm 11.19 and later skip dependency install scripts by default**, so a plain `npm install -g claudelink` can finish without errors but leave the server unable to start. The flag allows that one script and nothing else. Older npm versions accept the flag and behave as before.
+
+**Updating:** use the same command with `@latest`:
+```bash
+npm install -g claudelink@latest --allow-scripts=better-sqlite3
+```
+
+**Using nvm or another Node version manager?** Global packages are installed per Node version. After you install or switch to a new Node version, run the install command again under it, or your AI client may fail to start ClaudeLink or pick up an older copy elsewhere on your `PATH`.
 
 ### 2. Add to your AI client
 
@@ -720,6 +729,16 @@ Each CLI has its own MCP config file format. ClaudeLink writes the right one for
 ---
 
 ## FAQ
+
+### ClaudeLink won't connect, or the server exits right after starting
+
+Almost always one of three things:
+
+1. **The SQLite addon was never built.** npm 11.19+ skips install scripts by default. The server log says so and prints the fix. Reinstall with `npm install -g claudelink --allow-scripts=better-sqlite3`, then reconnect the server in your client (in Claude Code: `/mcp`, select **claudelink**, **Reconnect**).
+2. **You switched Node versions.** With nvm, each Node version has its own global packages, so the new one may have no ClaudeLink at all. Run the install command under the new version.
+3. **An older copy is being found first.** `which -a claudelink-server` lists every copy on your `PATH`. Remove any you don't want with `npm uninstall -g claudelink` run under that copy's npm.
+
+Check what is installed with `npm ls -g claudelink`.
 
 ### Wait, does `npx claudelink init` start any of the CLIs?
 

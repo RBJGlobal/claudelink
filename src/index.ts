@@ -129,8 +129,22 @@ PARAMS {safe_to_clear, handoff_path, note}:
 
 If your role is on the armed allowlist, your call may trigger a real /compact. If not, ClaudeLink records for calibration. Either way, calling is how the system gets safer.`;
 
+// Report the real package version in the MCP handshake. This was hardcoded
+// to "1.0.0", which made a stale install indistinguishable from a current one
+// in the client's connection log.
+function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")
+    );
+    return typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 const server = new Server(
-  { name: "ClaudeLink", version: "1.0.0" },
+  { name: "ClaudeLink", version: packageVersion() },
   { capabilities: { tools: {} }, instructions: CHECKPOINT_INSTRUCTIONS }
 );
 
