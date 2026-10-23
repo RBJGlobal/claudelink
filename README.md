@@ -486,7 +486,7 @@ The Command Center runs a periodic scheduler that types `check for updates` into
 - **On/off toggle** — Auto-nudge panel
 - **Interval** — 1–120 minutes (default 5)
 
-The scheduler is **smart**: the SQL filter only nudges terminals with unread mail. Empty inboxes don't burn agent turns or tokens. Per-terminal-app dispatch:
+The scheduler is **smart**: the SQL filter only nudges terminals with unread mail that is worth a turn. Empty inboxes don't burn agent turns or tokens, and neither do FYIs: a message sent with `expectsReply: false` does not wake the recipient unless it is `priority: "high"`. Every nudge makes the agent re-read its whole context, so on a long session one nudge is expensive. FYIs are still delivered: the agent sees them on your next prompt. Per-terminal-app dispatch:
 
 | Terminal | Mechanism | Permissions |
 |---|---|---|

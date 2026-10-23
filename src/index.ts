@@ -205,7 +205,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           expectsReply: {
             type: "boolean",
             description:
-              "Whether this message expects a reply (default: true). Set to false for FYI/informational pings so the recipient's auto-reply Stop hook does not fire.",
+              "Whether this message expects a reply (default: true). Set to false for FYI/informational pings: the recipient is then neither auto-nudged nor auto-replied, and reads it on its next turn. Combine with priority \"high\" to wake the recipient anyway.",
           },
           parentMessageId: {
             type: "number",
@@ -229,7 +229,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           expectsReply: {
             type: "boolean",
             description:
-              "Whether this broadcast expects replies (default: true). Set to false for FYI announcements.",
+              "Whether this broadcast expects replies (default: true). Set to false for FYI announcements, which then wake no one; recipients read them on their next turn.",
           },
         },
         required: ["message"],
