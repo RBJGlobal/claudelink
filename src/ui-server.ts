@@ -1312,9 +1312,26 @@ function setPollInterval(ms) {
   pollHandle = setInterval(refresh, ms);
 }
 
+// REFRESH SAFETY. The table is rebuilt from /api/state every poll, so:
+//  - never run two refreshes at once (a slow response must not stack up);
+//  - drop a response whose request started before the operator's last
+//    checkbox change, or it redraws the pre-click state and the box "flips
+//    back";
+//  - don't redraw while a pointer is held down, or the element under the
+//    cursor is replaced mid-click and the click is lost.
+let refreshInFlight = false;
+let lastMutationAt = 0;
+let pointerHeld = false;
+document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+document.addEventListener("pointerup", () => { setTimeout(() => { pointerHeld = false; }, 150); }, true);
+document.addEventListener("pointercancel", () => { pointerHeld = false; }, true);
 async function refresh() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  const startedAt = Date.now();
   try {
     const state = await api("/api/state");
+    if (startedAt < lastMutationAt || pointerHeld) return; // stale or mid-click: next poll redraws
     render(state);
     $("status-dot").style.background = "var(--green)";
     $("disconnected-banner").classList.remove("show");
@@ -1330,6 +1347,8 @@ async function refresh() {
       $("disconnected-banner").classList.add("show");
       setPollInterval(POLL_SLOW);
     }
+  } finally {
+    refreshInFlight = false;
   }
 }
 
@@ -1399,10 +1418,12 @@ document.addEventListener("change", async (e) => {
   const compactId = t.getAttribute("data-compact-id");
   if (compactId) {
     const enabled = t.checked;
+    lastMutationAt = Date.now();
     try {
       await api("/api/agents/" + encodeURIComponent(compactId) + "/compact", "POST", { enabled });
+      lastMutationAt = Date.now();
       toast("Auto-compact " + (enabled ? "enabled" : "disabled") + " for this agent");
-      refresh();
+      setTimeout(refresh, 0);
     } catch (err) {
       t.checked = !enabled;
       toast(err.message, "error");
@@ -1412,10 +1433,12 @@ document.addEventListener("change", async (e) => {
   const autonomousId = t.getAttribute("data-autonomous-id");
   if (!autonomousId) return;
   const enabled = t.checked;
+  lastMutationAt = Date.now();
   try {
     await api("/api/agents/" + encodeURIComponent(autonomousId) + "/autonomous", "POST", { enabled });
+    lastMutationAt = Date.now();
     toast("Auto-reply " + (enabled ? "enabled" : "disabled"));
-    refresh();
+    setTimeout(refresh, 0);
   } catch (err) {
     t.checked = !enabled;
     toast(err.message, "error");

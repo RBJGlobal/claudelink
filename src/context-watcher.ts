@@ -304,74 +304,143 @@ interface TurnEconomics {
 // mid-stream doesn't leak the file handle.
 // Exported for testability — the latest-ts guard regression is easy to lose
 // without a pinning test.
-export async function latestTurnEconomics(
-  file: string
-): Promise<TurnEconomics | null> {
-  let contextTokens: number | null = null;
-  let model = "";
-  let latestTs = -Infinity;
-  const recentTs: number[] = []; // timestamps of recent real turns (rolling)
-  const RECENT = 20;
-  const input = fs.createReadStream(file, { encoding: "utf-8" });
+// INCREMENTAL: this runs for every live agent on every Command Center refresh
+// and every watcher tick, and transcripts reach 100MB+. Re-reading each file
+// from byte 0 each time pinned a CPU core and made /api/state take 15s+, which
+// in turn let stale overlapping responses flip UI checkboxes back. The scan is
+// a pure fold over lines, so we keep the fold's state per file and only read
+// bytes appended since the last call. A shrunk file (rewrite/rotation) resets.
+// A partially written last line is left for the next call. Concurrent calls
+// for the same file share one in-flight scan so nothing is folded twice.
+interface EconScanState {
+  offset: number;
+  size: number;
+  contextTokens: number | null;
+  model: string;
+  latestTs: number;
+  recentTs: number[];
+}
+const econScan = new Map<string, EconScanState>();
+const econInflight = new Map<string, Promise<void>>();
+const RECENT = 20;
+
+function foldEconLine(st: EconScanState, line: string): void {
+  // COMPACT-BOUNDARY: a `/compact` writes a `system/compact_boundary` line
+  // carrying the real post-compact size in `compactMetadata.postTokens`, but
+  // NO `usage` line until the agent's next model turn. On an idle terminal
+  // that just compacted, the chronologically-last `usage` line is the stale
+  // pre-compact turn — so without this branch we report the pre-compact
+  // occupancy (e.g. 164K/82%) until the next turn writes a fresh usage line.
+  // Honor the boundary as the latest occupancy datum. Must be checked BEFORE
+  // the `"usage"` skip below (the boundary line carries no usage). Same
+  // latest-ts guard as usage lines, and the same treatment as the timeline
+  // reader (scanFileForTimeline). A real post-compact turn arrives with a
+  // later ts and correctly re-overrides — self-healing.
+  if (line.indexOf("compact_boundary") !== -1) {
+    try {
+      const o = JSON.parse(line);
+      if (o?.type === "system" && o?.subtype === "compact_boundary") {
+        const post = o.compactMetadata?.postTokens;
+        const cts = Date.parse(o.timestamp || "");
+        if (Number.isFinite(cts) && cts >= st.latestTs && post != null) {
+          st.latestTs = cts;
+          st.contextTokens = Number(post) || 0;
+          // model carries over from the last real turn — a compact cannot
+          // occur on a session with no prior model turn, so it stays valid.
+        }
+        return;
+      }
+    } catch {
+      /* fall through to usage handling */
+    }
+  }
+  if (line.indexOf('"usage"') === -1) return;
+  let o: any;
+  try {
+    o = JSON.parse(line);
+  } catch {
+    return;
+  }
+  const msg = o?.message;
+  if (!msg?.usage || !msg?.model || msg.model === "<synthetic>") return;
+  const ts = Date.parse(o.timestamp || "");
+  if (!Number.isFinite(ts)) return;
+  if (ts >= st.latestTs) {
+    st.latestTs = ts;
+    st.contextTokens = inputSideTokens(msg.usage);
+    st.model = msg.model;
+  }
+  st.recentTs.push(ts);
+  if (st.recentTs.length > RECENT) st.recentTs.shift();
+}
+
+async function advanceEconScan(file: string): Promise<void> {
+  const size = fs.statSync(file).size;
+  let st = econScan.get(file);
+  if (!st || size < st.offset) {
+    st = { offset: 0, size: 0, contextTokens: null, model: "", latestTs: -Infinity, recentTs: [] };
+    econScan.set(file, st);
+  }
+  if (size <= st.offset) return;
+  let endsWithNewline = true;
+  try {
+    const fd = fs.openSync(file, "r");
+    const b = Buffer.alloc(1);
+    fs.readSync(fd, b, 0, 1, size - 1);
+    fs.closeSync(fd);
+    endsWithNewline = b[0] === 10;
+  } catch {
+    /* treat as complete */
+  }
+  const input = fs.createReadStream(file, { start: st.offset, end: size - 1, encoding: "utf-8" });
   const rl = readline.createInterface({ input, crlfDelay: Infinity });
+  let consumed = 0;
+  let prev: string | null = null;
   try {
     for await (const line of rl) {
-      // COMPACT-BOUNDARY: a `/compact` writes a `system/compact_boundary` line
-      // carrying the real post-compact size in `compactMetadata.postTokens`, but
-      // NO `usage` line until the agent's next model turn. On an idle terminal
-      // that just compacted, the chronologically-last `usage` line is the stale
-      // pre-compact turn — so without this branch we report the pre-compact
-      // occupancy (e.g. 164K/82%) until the next turn writes a fresh usage line.
-      // Honor the boundary as the latest occupancy datum. Must be checked BEFORE
-      // the `"usage"` skip below (the boundary line carries no usage). Same
-      // latest-ts guard as usage lines, and the same treatment as the timeline
-      // reader (scanFileForTimeline). A real post-compact turn arrives with a
-      // later ts and correctly re-overrides — self-healing.
-      if (line.indexOf("compact_boundary") !== -1) {
-        try {
-          const o = JSON.parse(line);
-          if (o?.type === "system" && o?.subtype === "compact_boundary") {
-            const post = o.compactMetadata?.postTokens;
-            const cts = Date.parse(o.timestamp || "");
-            if (Number.isFinite(cts) && cts >= latestTs && post != null) {
-              latestTs = cts;
-              contextTokens = Number(post) || 0;
-              // model carries over from the last real turn — a compact cannot
-              // occur on a session with no prior model turn, so it stays valid.
-            }
-            continue;
-          }
-        } catch {
-          /* fall through to usage handling */
-        }
+      if (prev !== null) {
+        foldEconLine(st, prev);
+        consumed += Buffer.byteLength(prev, "utf8") + 1;
       }
-      if (line.indexOf('"usage"') === -1) continue;
-      let o: any;
-      try {
-        o = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const msg = o?.message;
-      if (!msg?.usage || !msg?.model || msg.model === "<synthetic>") continue;
-      const ts = Date.parse(o.timestamp || "");
-      if (!Number.isFinite(ts)) continue;
-      if (ts >= latestTs) {
-        latestTs = ts;
-        contextTokens = inputSideTokens(msg.usage);
-        model = msg.model;
-      }
-      recentTs.push(ts);
-      if (recentTs.length > RECENT) recentTs.shift();
+      prev = line;
+    }
+    if (prev !== null && endsWithNewline) {
+      foldEconLine(st, prev);
+      consumed += Buffer.byteLength(prev, "utf8") + 1;
     }
   } finally {
+    // STREAM CLEANUP: explicit close so a transient error mid-stream doesn't
+    // leak the file handle.
     rl.close();
     input.destroy();
   }
-  if (contextTokens === null) return null;
+  st.offset += consumed;
+  st.size = size;
+}
+
+export async function latestTurnEconomics(
+  file: string
+): Promise<TurnEconomics | null> {
+  // Serialize per file: wait out any scan already running, then advance.
+  for (;;) {
+    const running = econInflight.get(file);
+    if (!running) break;
+    await running.catch(() => {});
+  }
+  const p = advanceEconScan(file);
+  econInflight.set(file, p);
+  try {
+    await p;
+  } finally {
+    econInflight.delete(file);
+  }
+  const st = econScan.get(file);
+  if (!st || st.contextTokens === null) return null;
+  const contextTokens = st.contextTokens;
+  const model = st.model;
   // Use the by-time latest, not the by-position last, for last-activity too —
   // and sort recentTs so the turns/hour denominator reflects real chronology.
-  recentTs.sort((a, b) => a - b);
+  const recentTs = [...st.recentTs].sort((a, b) => a - b);
   const lastTurnTs = recentTs.length ? recentTs[recentTs.length - 1] : 0;
   // turns/hour over the recent window (guard against a zero/tiny span).
   let turnsPerHour = 0;
