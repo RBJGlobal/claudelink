@@ -18,6 +18,7 @@ import {
   writeSchedulerSettings,
 } from "./scheduler-settings.js";
 import { readFleetUsage, FleetUsage, readAgentTimelines, AgentTimeline } from "./usage-reader.js";
+import { readAgentOverhead, AgentOverhead } from "./overhead-reader.js";
 import {
   startContextWatcher,
   ContextWatcherHandle,
@@ -441,6 +442,52 @@ async function getUsage(windowDays: number): Promise<FleetUsage> {
     })
     .finally(() => usageInflight.delete(windowDays));
   usageInflight.set(windowDays, p);
+  return p;
+}
+
+// Per-agent fixed per-turn overhead (instruction files, memory index, MCP
+// servers, model mix). File stats are cheap; the transcript scan is
+// incremental, so a short TTL is fine. In-flight dedupe like the others.
+const OVERHEAD_TTL_MS = 60 * 1000;
+let overheadCache: { at: number; data: AgentOverhead[] } | null = null;
+let overheadInflight: Promise<AgentOverhead[]> | null = null;
+async function getOverhead(): Promise<AgentOverhead[]> {
+  if (overheadCache && Date.now() - overheadCache.at < OVERHEAD_TTL_MS) return overheadCache.data;
+  if (overheadInflight) return overheadInflight;
+  const p = (async () => {
+    const db = new Database(DB_PATH(), { readonly: true });
+    let rows: { role: string; pid: number; transcript_path: string | null }[];
+    try {
+      try {
+        rows = db.prepare(`SELECT role, pid, transcript_path FROM agents`).all() as any;
+      } catch {
+        rows = (db.prepare(`SELECT role, pid FROM agents`).all() as any).map((r: any) => ({ ...r, transcript_path: null }));
+      }
+    } finally {
+      db.close();
+    }
+    const live = rows.filter((r) => isProcessAlive(r.pid));
+    const out = await Promise.all(
+      live.map((r) =>
+        readAgentOverhead({
+          role: r.role,
+          cwd: cwdForPid(r.pid),
+          transcriptPath: findFleetTranscript({ pid: r.pid, transcript_path: r.transcript_path }),
+        }).catch(() => null)
+      )
+    );
+    return out
+      .filter((o): o is AgentOverhead => o !== null)
+      .sort((a, b) => b.instructions.totalBytes - a.instructions.totalBytes);
+  })()
+    .then((data) => {
+      overheadCache = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      overheadInflight = null;
+    });
+  overheadInflight = p;
   return p;
 }
 
@@ -923,6 +970,21 @@ const HTML = String.raw`<!doctype html>
         • <strong>Compacts</strong> — total number of times this agent's context has been reset over its lifetime, counting BOTH Claude Code's automatic auto-compacts (fire near the context limit) AND manual <span class="mono">/compact</span> or <span class="mono">/clear</span>. The split (N auto · M manual) is shown beneath the total. Each one is a <span class="mono">compact_boundary</span> marker in the transcript.<br>
         • <strong>Last compaction</strong> — the most recent reset: its trigger (auto/manual), the before→after token size, and the time.<br>
         The before/after is the current-context drop at a compaction, against the continuous cumulative line. Read-only — never writes transcripts or touches terminals.
+      </p>
+    </div>
+  </section>
+
+  <section class="panel full">
+    <h2>Per-Turn Overhead <span class="count" id="overhead-count">—</span></h2>
+    <div class="body">
+      <div id="overhead-body"><p class="nudge-hint">loading…</p></div>
+      <p class="nudge-hint">
+        What each live agent re-sends on <strong>every</strong> turn before the conversation itself, plus the models its current session ran on.<br>
+        • <strong>Instructions</strong> — every CLAUDE.md / CLAUDE.local.md / unscoped rules file Claude Code loads for that terminal (its folder and every folder above it, plus <span class="mono">~/.claude</span>). Tokens are approximate (bytes ÷ 4); <span class="mono">@imports</span> are not expanded, so this is a floor. Claude Code's guidance is under 200 lines per file.<br>
+        • <strong>Memory index</strong> — the auto-memory <span class="mono">MEMORY.md</span>. Only its first 200 lines or 25KB load at session start; anything past that is <strong>silently dropped</strong>.<br>
+        • <strong>MCP servers</strong> — servers configured for that terminal, and which were not called this session. Each connected server adds to what every turn carries. Plugins and claude.ai connectors are listed separately or not at all.<br>
+        • <strong>Models</strong> — assistant turns per model in the current session.<br>
+        Read-only: file names, sizes and counts only. No file contents and no server configs are read out.
       </p>
     </div>
   </section>
@@ -1516,6 +1578,56 @@ loadUsage();
 // cadence so we mostly serve the cache and never overlap a scan.
 setInterval(loadUsage, 120000);
 
+// --- Per-turn overhead: instructions · memory index · MCP servers · models ---
+function fmtKB(b) { return b >= 1024 ? (b / 1024).toFixed(1) + "KB" : b + "B"; }
+function renderOverhead(list) {
+  $("overhead-count").textContent = list.length + " live";
+  if (!list.length) { $("overhead-body").innerHTML = '<p class="nudge-hint">No live agents.</p>'; return; }
+  const rows = list.map(function (a) {
+    const ins = a.instructions;
+    const long = ins.files.filter(function (f) { return f.overLineTarget; });
+    const insTitle = ins.files.map(function (f) { return f.path + " — " + f.lines + " lines, " + fmtKB(f.bytes); }).join("\n");
+    const insCell = '<span title="' + escapeHtml(insTitle) + '">≈' + fmtTokens(ins.approxTokens) + ' tok · ' + ins.files.length + ' file' + (ins.files.length === 1 ? '' : 's') + '</span>'
+      + (long.length ? '<br><span class="pill warn">' + long.length + ' over 200 lines</span>' : '');
+    let memCell = '<span class="nudge-hint">none</span>';
+    if (a.memory) {
+      const m = a.memory;
+      const label = m.lines + ' lines · ' + fmtKB(m.bytes);
+      memCell = m.truncated
+        ? '<span class="pill dead" title="Only the first 200 lines / 25KB load. The rest is dropped every session.">● truncated</span> ' + label
+        : (m.nearLimit ? '<span class="pill warn">● near limit</span> ' + label : label);
+    }
+    const mcp = a.mcp;
+    const mcpCell = mcp.configured.length
+      ? mcp.configured.length + ' configured' + (mcp.notCalledThisSession.length
+          ? '<br><span class="nudge-hint" title="' + escapeHtml(mcp.notCalledThisSession.join(", ")) + '">not called this session: ' + escapeHtml(mcp.notCalledThisSession.join(", ")) + '</span>'
+          : '')
+      : '<span class="nudge-hint">none</span>';
+    const mix = Object.entries(a.modelMix).sort(function (x, y) { return y[1] - x[1]; });
+    const total = mix.reduce(function (n, e) { return n + e[1]; }, 0);
+    const mixCell = total
+      ? mix.map(function (e) { return escapeHtml(e[0].replace(/^claude-/, "")) + ' ' + Math.round(e[1] * 100 / total) + '%'; }).join('<br>')
+      : '<span class="nudge-hint">—</span>';
+    return '<tr><td>' + escapeHtml(a.role) + '</td><td>' + insCell + '</td><td>' + memCell + '</td><td>' + mcpCell + '</td><td>' + mixCell + '</td></tr>';
+  }).join('');
+  $("overhead-body").innerHTML = '<table class="usage-proj"><thead><tr><th>Agent</th><th>Instructions</th><th>Memory index</th><th>MCP servers</th><th>Models (session)</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+let overheadLoading = false;
+async function loadOverhead() {
+  if (overheadLoading) return;
+  overheadLoading = true;
+  try {
+    const r = await api("/api/overhead", "GET");
+    renderOverhead(r.agents || []);
+  } catch (e) {
+    if (!e.disconnected) $("overhead-body").innerHTML = '<p class="nudge-hint">Could not load: ' + escapeHtml(e.message) + '</p>';
+  } finally {
+    overheadLoading = false;
+  }
+}
+loadOverhead();
+setInterval(loadOverhead, 60000);
+
 // --- Per-agent timeline: cumulative-lifetime · current-context · compactions ---
 function renderTimeline(ts) {
   if (!ts || !ts.length) { $("timeline-body").innerHTML = '<p class="nudge-hint">No agent timelines yet.</p>'; return; }
@@ -1909,6 +2021,13 @@ export function startUIServer(port = 7878): http.Server {
           }
         });
         req.on("error", (e: any) => send(400, { error: e.message }));
+        return;
+      }
+      if (req.method === "GET" && p === "/api/overhead") {
+        getOverhead().then(
+          (o) => send(200, { agents: o }),
+          (e: any) => send(500, { error: e?.message ?? String(e) })
+        );
         return;
       }
       if (req.method === "GET" && p === "/api/usage") {
