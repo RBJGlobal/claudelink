@@ -260,3 +260,61 @@ if (require.main === module) {
     }
   );
 }
+
+// ---- Freshness annotation for the Command Center tile ----
+//
+// The tile used to render the last captured percentages in large type no
+// matter how old they were. The proxy only captures while it is running AND a
+// terminal launched through it is making requests, so when either stops, the
+// file freezes; a reading weeks old still showed as e.g. "5% / 2%" while the
+// real figures were far higher. Two facts make a reading unusable, and both
+// are decided here, server-side, where they can be tested:
+//   - a window whose reset time has passed has reset since the reading, so its
+//     percentage describes a window that no longer exists;
+//   - a capture older than STALE_AFTER_MIN is not "current" in any useful sense.
+export const STALE_AFTER_MIN = 30;
+
+export interface QuotaFreshness {
+  ageMin: number;
+  stale: boolean;
+  proxyRunning: boolean;
+  sessionExpired: boolean;
+  weeklyExpired: boolean;
+  fableExpired: boolean;
+}
+
+function windowExpired(w: { resetEpoch?: number | null } | null | undefined, nowMs: number): boolean {
+  if (!w || w.resetEpoch == null) return false;
+  return w.resetEpoch * 1000 <= nowMs;
+}
+
+export function quotaFreshness(
+  rec: { capturedAtMs?: number; session?: any; weekly?: any; fable?: any },
+  nowMs: number,
+  proxyRunning: boolean
+): QuotaFreshness {
+  const captured = typeof rec.capturedAtMs === "number" ? rec.capturedAtMs : 0;
+  const ageMin = Math.max(0, Math.round((nowMs - captured) / 60000));
+  return {
+    ageMin,
+    stale: ageMin >= STALE_AFTER_MIN,
+    proxyRunning,
+    sessionExpired: windowExpired(rec.session, nowMs),
+    weeklyExpired: windowExpired(rec.weekly, nowMs),
+    fableExpired: windowExpired(rec.fable, nowMs),
+  };
+}
+
+// Is the passthrough proxy alive? Lock present AND its pid answers signal 0.
+// Mirrors the CLI's status check; any read/parse failure reads as "not running".
+export function proxyIsRunning(lockPath: string = PROXY_LOCK_PATH): boolean {
+  try {
+    const raw = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+    const pid = Number(raw?.pid);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}

@@ -37,7 +37,7 @@ import {
 } from "./usage-reader.js";
 import { verifyHandoff } from "./compact-executor.js";
 import { buildPromptClearText } from "./prompt-clear.js";
-import { QUOTA_PATH } from "./usage-proxy.js";
+import { QUOTA_PATH, quotaFreshness, proxyIsRunning } from "./usage-proxy.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DEFAULT_DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -743,10 +743,14 @@ const HTML = String.raw`<!doctype html>
     .plan-bar-fill.warn { background:#d29922; }
     .plan-bar-fill.danger { background:#f85149; }
     .plan-meter-sub { font-size:12px; color:var(--muted); margin-top:6px; }
+    #plan-usage-panel.plan-stale .plan-meter { opacity:.4; }
+    .plan-stale-banner { display:none; margin:0 0 12px; padding:8px 10px; border-radius:6px; font-size:13px; background:rgba(210,153,34,.12); border:1px solid #d29922; }
+    #plan-usage-panel.plan-stale .plan-stale-banner { display:block; }
   </style>
   <section class="panel full" id="plan-usage-panel" style="display:none">
     <h2>Plan Usage <span class="count" id="plan-binding">—</span></h2>
     <div class="body">
+      <p class="plan-stale-banner" id="plan-stale-banner"></p>
       <div class="plan-usage-grid">
         <div class="plan-meter">
           <div class="plan-meter-head"><span>Session · 5-hour window</span><b id="plan-5h-pct">—</b></div>
@@ -1558,8 +1562,15 @@ function fmtResetIn(resetEpoch, nowMs) {
   const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
   return "resets in " + (d > 0 ? d + "d " + h + "h" : h + "h " + String(m).padStart(2, "0") + "m");
 }
-function setPlanMeter(pctEl, barEl, subEl, data, nowMs) {
+function setPlanMeter(pctEl, barEl, subEl, data, nowMs, expired) {
   if (!data) { pctEl.textContent = "—"; barEl.style.width = "0%"; subEl.textContent = "not reported"; return; }
+  // A window whose reset has passed has reset since this reading, so the old
+  // percentage describes a window that no longer exists. Never show it.
+  if (expired) {
+    pctEl.textContent = "—"; barEl.style.width = "0%"; barEl.className = "plan-bar-fill";
+    subEl.textContent = "window has reset since the last reading";
+    return;
+  }
   const u = data.utilization == null ? null : Math.round(data.utilization * 100);
   pctEl.textContent = u == null ? "?%" : u + "%";
   barEl.style.width = (u == null ? 0 : Math.min(100, u)) + "%";
@@ -1573,16 +1584,19 @@ async function loadQuota() {
   if (!q || !q.present) { panel.style.display = "none"; return; }
   panel.style.display = "";
   const now = q.serverNowMs || Date.now();
-  setPlanMeter($("plan-5h-pct"), $("plan-5h-bar"), $("plan-5h-reset"), q.session, now);
-  setPlanMeter($("plan-7d-pct"), $("plan-7d-bar"), $("plan-7d-reset"), q.weekly, now);
+  const fr = q.freshness || {};
+  setPlanMeter($("plan-5h-pct"), $("plan-5h-bar"), $("plan-5h-reset"), q.session, now, fr.sessionExpired);
+  setPlanMeter($("plan-7d-pct"), $("plan-7d-bar"), $("plan-7d-reset"), q.weekly, now, fr.weeklyExpired);
   // Fable weekly pool — only present after a Fable request; carried forward with
   // its own timestamp, so it shows an independent "as of".
   const fableMeter = $("plan-fable-meter");
   if (q.fable) {
     fableMeter.style.display = "";
-    setPlanMeter($("plan-fable-pct"), $("plan-fable-bar"), $("plan-fable-reset"), q.fable, now);
-    const fAgeMin = Math.round((now - q.fable.capturedAtMs) / 60000);
-    $("plan-fable-reset").textContent += " · as of " + fAgeMin + "m ago";
+    setPlanMeter($("plan-fable-pct"), $("plan-fable-bar"), $("plan-fable-reset"), q.fable, now, fr.fableExpired);
+    if (!fr.fableExpired) {
+      const fAgeMin = Math.round((now - q.fable.capturedAtMs) / 60000);
+      $("plan-fable-reset").textContent += " · as of " + fmtAgo(fAgeMin);
+    }
   } else {
     fableMeter.style.display = "none";
   }
@@ -1590,12 +1604,26 @@ async function loadQuota() {
     : q.binding === "seven_day" ? "weekly is the active limit"
     : (q.binding || "");
   $("plan-binding").textContent = bindLabel;
-  const ageMin = Math.round((now - q.capturedAtMs) / 60000);
-  const stale = ageMin >= 10;
+  const ageMin = fr.ageMin != null ? fr.ageMin : Math.round((now - q.capturedAtMs) / 60000);
+  const stale = fr.stale != null ? fr.stale : ageMin >= 30;
+  const when = new Date(q.capturedAtMs).toLocaleString();
+  $("plan-usage-panel").classList.toggle("plan-stale", !!stale);
+  // Say WHY there is no fresh reading and what feeds it, because the cause is
+  // never on this page: the proxy is stopped, or nothing is routed through it.
+  $("plan-stale-banner").innerHTML = !stale ? "" : (
+    "<strong>No live reading since " + when + ".</strong> These numbers are out of date. "
+    + (fr.proxyRunning
+      ? "The usage proxy is running, but no Claude Code terminal launched through it has made a request since then. Start a terminal with <span class='mono'>claude-metered</span> to feed it."
+      : "The usage proxy is stopped. Run <span class='mono'>claudelink usage --on</span>, then start a terminal with <span class='mono'>claude-metered</span>.")
+  );
   $("plan-usage-foot").innerHTML =
-    "As of " + new Date(q.capturedAtMs).toLocaleTimeString() + " (" + ageMin + "m ago)"
-    + (stale ? " — <strong>stale</strong>; refreshes on your next Claude Code request through the proxy" : "")
+    "As of " + when + " (" + fmtAgo(ageMin) + ")"
     + ". Local-only, read from ~/.claudelink/quota.json — never leaves this machine.";
+}
+function fmtAgo(min) {
+  if (min < 60) return min + "m ago";
+  if (min < 48 * 60) return Math.round(min / 60) + "h ago";
+  return Math.round(min / 1440) + "d ago";
 }
 loadQuota();
 setInterval(loadQuota, 30000);
@@ -1901,7 +1929,14 @@ export function startUIServer(port = 7878): http.Server {
         } catch {
           /* no data — proxy not running or no request captured yet */
         }
-        return send(200, rec ? { present: true, serverNowMs: Date.now(), ...rec } : { present: false });
+        if (!rec) return send(200, { present: false });
+        const nowMs = Date.now();
+        return send(200, {
+          present: true,
+          serverNowMs: nowMs,
+          ...rec,
+          freshness: quotaFreshness(rec, nowMs, proxyIsRunning()),
+        });
       }
       if (req.method === "GET" && p === "/api/agent-timeline") {
         getAgentTimelines().then(

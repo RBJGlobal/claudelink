@@ -6,6 +6,7 @@ import os from "os";
 import {
   QUOTA_PATH,
   PROXY_LOCK_PATH,
+  quotaFreshness,
   DEFAULT_PROXY_PORT,
   type QuotaRecord,
 } from "./usage-proxy.js";
@@ -1075,28 +1076,30 @@ function usageStatus() {
     return;
   }
 
-  const ageMin = Math.round((Date.now() - rec.capturedAtMs) / 60000);
-  console.log(`  As of:   ${rec.capturedAt} (${ageMin}m ago)`);
+  const fr = quotaFreshness(rec, Date.now(), !!running);
+  console.log(`  As of:   ${rec.capturedAt} (${fr.ageMin}m ago)`);
+  if (fr.stale) {
+    console.log(
+      `\n  STALE: no reading for ${fr.ageMin}m. These figures are out of date.\n` +
+        (running
+          ? `  The proxy is running but no terminal launched through it has made a\n  request. Start one with: claude-metered\n`
+          : `  Start the proxy (claudelink usage --on), then a terminal with: claude-metered\n`)
+    );
+  }
   if (rec.overallStatus) console.log(`  Status:  ${rec.overallStatus}`);
-  if (rec.session)
+  // A window whose reset time has passed has reset since this reading: its old
+  // percentage describes a window that no longer exists, so don't print it.
+  const line = (label: string, w: any, expired: boolean, suffix = "") =>
     console.log(
-      `  Session: ${pct(rec.session.utilization).padStart(4)} used  · resets in ${fmtCountdown(
-        rec.session.resetEpoch
-      )}`
+      expired
+        ? `  ${label} ----  · window has reset since this reading`
+        : `  ${label} ${pct(w.utilization).padStart(4)} used  · resets in ${fmtCountdown(w.resetEpoch)}${suffix}`
     );
-  if (rec.weekly)
-    console.log(
-      `  Weekly:  ${pct(rec.weekly.utilization).padStart(4)} used  · resets in ${fmtCountdown(
-        rec.weekly.resetEpoch
-      )}`
-    );
+  if (rec.session) line("Session:", rec.session, fr.sessionExpired);
+  if (rec.weekly) line("Weekly: ", rec.weekly, fr.weeklyExpired);
   if (rec.fable) {
     const fAge = Math.round((Date.now() - rec.fable.capturedAtMs) / 60000);
-    console.log(
-      `  Fable:   ${pct(rec.fable.utilization).padStart(4)} used  · resets in ${fmtCountdown(
-        rec.fable.resetEpoch
-      )}  (weekly pool, as of ${fAge}m ago)`
-    );
+    line("Fable:  ", rec.fable, fr.fableExpired, `  (weekly pool, as of ${fAge}m ago)`);
   }
   if (rec.binding) console.log(`  Binding: ${rec.binding}`);
   console.log();
