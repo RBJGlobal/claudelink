@@ -1383,7 +1383,7 @@ function renderUsage(u) {
   $("usage-window").textContent = u.windowDays + "d";
   $("usage-summary").innerHTML =
     '<div class="usage-stat"><div class="label">Total tokens</div><div class="value">' + fmtTokens(t.totalTokens) + '</div><div class="sub">' + u.scannedProjects + ' projects</div></div>' +
-    '<div class="usage-stat"><div class="label">API-equiv. value</div><div class="value">' + fmtUsd(t.estCostUsd) + '</div><div class="sub">at list price · Max = flat fee</div></div>' +
+    '<div class="usage-stat"><div class="label">API-equiv. value</div><div class="value">' + fmtUsd(t.estCostUsd) + '</div><div class="sub">at list price · Max = flat fee' + ((u.unpricedModels && u.unpricedModels.length) ? ' · excludes unpriced: ' + u.unpricedModels.map(escapeHtml).join(', ') : '') + '</div></div>' +
     '<div class="usage-stat"><div class="label">Output tokens</div><div class="value">' + fmtTokens(t.output) + '</div><div class="sub">' + fmtTokens(t.input) + ' input</div></div>' +
     '<div class="usage-stat"><div class="label">Cache reads</div><div class="value">' + fmtTokens(t.cacheRead) + '</div><div class="sub">' + fmtTokens(t.cacheCreation) + ' writes</div></div>' +
     '<div class="usage-stat"><div class="label">Models</div><div class="value" style="font-size:13px;font-weight:500;line-height:1.5">' + (models.map(m => '<span class="usage-model-chip">' + escapeHtml(m.replace("claude-","")) + '</span>').join("") || "—") + '</div></div>';

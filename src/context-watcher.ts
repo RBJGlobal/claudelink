@@ -31,7 +31,7 @@ import {
   cwdForPid,
   projectIdFromCwd,
   PROJECTS_DIR,
-  OPUS_CACHE_READ_PER_MTOK,
+  MAX_CACHE_READ_PER_MTOK,
   cacheReadPricePerMtok,
   effectiveContextWindow,
 } from "./usage-reader.js";
@@ -491,7 +491,7 @@ export async function projectCompactOpportunity(
     compactBaselineTokens,
     flaggedTurns,
     excessTokensUpperBound: excess,
-    estUsdUpperBound: (excess * OPUS_CACHE_READ_PER_MTOK) / 1_000_000,
+    estUsdUpperBound: (excess * MAX_CACHE_READ_PER_MTOK) / 1_000_000,
     perProject,
   };
 }

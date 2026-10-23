@@ -35,28 +35,64 @@ import { readContextWatcherSettings } from "./context-watcher-settings.js";
 
 export const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
-// Per-million-token price ESTIMATES (USD). Clearly approximate — edit here or
-// surface as user-editable later. Cost is a secondary signal; raw tokens are
-// the ground truth. Cache reads are heavily discounted; cache writes cost a
-// premium over fresh input.
+// Per-million-token list prices (USD), Anthropic first-party API, checked
+// 2026-10-23. Cost is a secondary signal (on a subscription plan it is
+// "API-equivalent value", not a bill); raw tokens are the ground truth.
+//
+// Matched by model FAMILY, most specific first, because the same family name
+// spans generations with very different prices: current Opus is a third of
+// the old Opus price, and Fable is priced above Opus. The previous table had
+// one row per family name and sent every unknown id to Sonnet pricing, which
+// overpriced Opus ~3x and underpriced Fable ~3.3x without any visible sign.
+// Unknown models are now UNPRICED (excluded from $ totals and listed), never
+// silently given another model's price.
+//
+// cacheWrite is the 5-minute cache-write rate (1.25x input). cacheRead is 0.1x
+// input unless the model's published cache-read price differs.
 interface ModelPrice {
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
 }
-const PRICES: Record<string, ModelPrice> = {
-  opus: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
-  sonnet: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  haiku: { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
-};
-function priceFor(model: string): ModelPrice {
-  const m = model.toLowerCase();
-  if (m.includes("opus")) return PRICES.opus;
-  if (m.includes("haiku")) return PRICES.haiku;
-  // Unknown / sonnet → sonnet-tier as a neutral, clearly-labeled fallback.
-  return PRICES.sonnet;
+const price = (input: number, output: number, cacheRead = input * 0.1): ModelPrice => ({
+  input,
+  output,
+  cacheRead,
+  cacheWrite: input * 1.25,
+});
+// [substring of the model id, price]. First match wins, so order is
+// specific-before-general within each family.
+const PRICE_TABLE: Array<[string, ModelPrice]> = [
+  ["fable-5-1", price(10, 50, 0.25)],
+  ["mythos-5-1", price(10, 50, 0.25)],
+  ["fable-5", price(10, 50)],
+  ["mythos", price(10, 50)],
+  ["opus-5-5", price(4, 20, 0.2)],
+  ["opus-5", price(5, 25)],
+  ["opus-4-8", price(5, 25)],
+  ["opus-4-7", price(5, 25)],
+  ["opus-4-6", price(5, 25)],
+  ["opus-4-5", price(5, 25)],
+  ["opus", price(15, 75)], // Opus 4.1 and earlier
+  ["sonnet-5-5", price(2, 10, 0.2)],
+  ["sonnet-5", price(2, 10)],
+  ["sonnet", price(3, 15)], // Sonnet 4.6 and earlier
+  ["haiku-5-5", price(0.1, 0.5)], // <=100K-token prompts; longer prompts cost more
+  ["haiku-4-5", price(1, 5)],
+  ["haiku", price(0.8, 4)], // Haiku 3.5 and earlier
+];
+// Exported for testability. null = unpriced (unknown model id).
+export function priceFor(model: string): ModelPrice | null {
+  const m = (model || "").toLowerCase().trim();
+  // Bare aliases ("opus", "sonnet", "haiku") name whichever generation was
+  // current when the record was written, so they can't be priced reliably.
+  if (m === "opus" || m === "sonnet" || m === "haiku" || m === "fable") return null;
+  for (const [key, p] of PRICE_TABLE) if (m.includes(key)) return p;
+  return null;
 }
+const ZERO_PRICE: ModelPrice = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+const pricedOrZero = (model: string): ModelPrice => priceFor(model) ?? ZERO_PRICE;
 
 export interface TokenBucket {
   input: number;
@@ -103,6 +139,9 @@ export interface FleetUsage {
     perDay: PerDayPoint[];
   };
   projects: ProjectUsage[];
+  // Models seen in the window with no known price. Their tokens are counted
+  // but contribute $0, so the UI must say the $ figures exclude them.
+  unpricedModels: string[];
   // Compact-savings opportunity, computed in the SAME transcript pass as the
   // meter (no second full scan). Upper-bound — real delta is measured in soak.
   compactOpportunity: {
@@ -141,7 +180,7 @@ function addUsage(b: TokenBucket, model: string, u: any): void {
   b.cacheRead += cacheRead;
   b.cacheCreation += cacheCreation;
   b.totalTokens += input + output + cacheRead + cacheCreation;
-  const p = priceFor(model);
+  const p = pricedOrZero(model);
   b.estCostUsd +=
     (input * p.input +
       output * p.output +
@@ -182,13 +221,15 @@ export function projectIdFromCwd(cwd: string): string {
 // Opus cache-read list price (USD per million tokens). The context-hygiene
 // projection values "excess" re-read tokens at this rate. Labeled as an
 // estimate wherever surfaced.
-export const OPUS_CACHE_READ_PER_MTOK = PRICES.opus.cacheRead;
+// Upper-bound cache-read price: the most expensive priced model, so an
+// "upper bound" estimate stays an upper bound whatever the fleet runs.
+export const MAX_CACHE_READ_PER_MTOK = Math.max(...PRICE_TABLE.map(([, p]) => p.cacheRead));
 
 // Model-aware cache-read price (USD per million tokens). The $/turn economic
 // trigger uses this so the threshold auto-adjusts across models — Opus triggers
 // far earlier than Haiku for the same context size, which is correct.
 export function cacheReadPricePerMtok(model: string): number {
-  return priceFor(model).cacheRead;
+  return pricedOrZero(model).cacheRead;
 }
 
 // Model context window (tokens). Default 200K — the standard window for Opus
@@ -399,7 +440,7 @@ async function scanTranscript(
     const output = Number(u.output_tokens) || 0;
     const cacheRead = Number(u.cache_read_input_tokens) || 0;
     const cacheCreation = Number(u.cache_creation_input_tokens) || 0;
-    const p = priceFor(model);
+    const p = pricedOrZero(model);
     slot.totalTokens += input + output + cacheRead + cacheCreation;
     slot.estCostUsd +=
       (input * p.input + output * p.output + cacheRead * p.cacheRead + cacheCreation * p.cacheWrite) /
@@ -529,7 +570,7 @@ export async function readAgentTimelines(agents: AgentRef[]): Promise<AgentTimel
       if (ft.latestTs > (latestTsByRole.get(role) || 0) && ft.latestCtxTokens > 0) {
         latestTsByRole.set(role, ft.latestTs);
         t.currentContextTokens = ft.latestCtxTokens;
-        t.currentContextPerTurnUsd = (ft.latestCtxTokens * priceFor(ft.latestModel).cacheRead) / 1_000_000;
+        t.currentContextPerTurnUsd = (ft.latestCtxTokens * pricedOrZero(ft.latestModel).cacheRead) / 1_000_000;
         t.lastActivity = new Date(ft.latestTs).toISOString();
       }
     }
@@ -696,12 +737,15 @@ export async function readFleetUsage(
     skippedNoCwd,
     fleet: { totals: fleetTotals, perModel: fleetPerModel, perDay: perDaySeries },
     projects,
+    unpricedModels: Object.keys(fleetPerModel).filter(
+      (m) => m !== "<synthetic>" && priceFor(m) === null
+    ),
     compactOpportunity: {
       thresholdTokens,
       compactBaselineTokens,
       flaggedTurns: opp.flaggedTurns,
       excessTokensUpperBound: opp.excessTokens,
-      estUsdUpperBound: (opp.excessTokens * OPUS_CACHE_READ_PER_MTOK) / 1_000_000,
+      estUsdUpperBound: (opp.excessTokens * MAX_CACHE_READ_PER_MTOK) / 1_000_000,
     },
   };
 }
