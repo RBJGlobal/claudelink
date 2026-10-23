@@ -68,6 +68,14 @@ export interface ContextWatcherSettings {
   // an empty/unset list fires on NO ONE. Only roles explicitly listed here are
   // ever auto-compacted, regardless of all the other gates. This is what makes
   // a standing-on rollout a controlled subset rather than fleet-wide.
+  // OPERATOR-DECLARED CONTEXT WINDOWS, keyed by model id (or any substring of
+  // one, e.g. "opus-5"). The 1M-context beta is a request header and never
+  // appears in the transcript, so the same family runs at 200K for one
+  // operator and 1M for another and no amount of inspection can tell them
+  // apart below 200K. Declaring it here is what makes occupancy correct.
+  // Longest matching key wins. Empty (the default) = legacy inference only,
+  // so public behavior is unchanged for anyone who never sets it.
+  modelContextWindows: Record<string, number>;
   injectAllowlist: string[];
   // One-shot LATCH for armed inject: fire on the first qualifying agent, then
   // auto-disable (set enabled=false) and log loudly. NOT a cooldown — a single
@@ -94,10 +102,28 @@ const DEFAULTS: ContextWatcherSettings = {
   askMessage:
     "Context check (automated): you're at high context occupancy and currently idle. If this is a good moment to /compact, FIRST update your HANDOVER.md / artifacts so nothing is lost, THEN call signal_checkpoint with safe_to_clear=true and your handoff_path to consent — I'll /compact you on the next check. If you're mid-something-heavy, call signal_checkpoint with safe_to_clear=false and a one-line note and I'll hold off.",
   consentFreshMin: 15,
+  modelContextWindows: {}, // empty = infer, never declare on the user's behalf
   injectAllowlist: [], // fail-closed: empty = arm nobody
   oneShot: true,
   activeSince: null,
 };
+
+// Sanitize the operator-declared window map. Drops empty keys and any value
+// that is not a positive finite token count, then clamps to a sane range so a
+// typo (1000 or 1e12) can neither arm the fleet instantly nor disarm it
+// forever. Unknown input shapes degrade to {} rather than throwing.
+function cleanWindowMap(v: any): Record<string, number> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out: Record<string, number> = {};
+  for (const [rawKey, rawVal] of Object.entries(v)) {
+    const key = String(rawKey ?? "").trim();
+    if (!key) continue;
+    const n = Number(rawVal);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    out[key] = Math.round(Math.max(50_000, Math.min(2_000_000, n)));
+  }
+  return out;
+}
 
 function cleanAllowlist(v: any): string[] {
   if (!Array.isArray(v)) return [];
@@ -165,6 +191,7 @@ export function readContextWatcherSettings(): ContextWatcherSettings {
           ? parsed.askMessage
           : DEFAULTS.askMessage,
       consentFreshMin: clampInt(Number(parsed.consentFreshMin), 1, 120, DEFAULTS.consentFreshMin),
+      modelContextWindows: cleanWindowMap(parsed.modelContextWindows),
       injectAllowlist: cleanAllowlist(parsed.injectAllowlist),
       oneShot: parsed.oneShot === undefined ? DEFAULTS.oneShot : Boolean(parsed.oneShot),
       activeSince:
@@ -233,6 +260,10 @@ export function writeContextWatcherSettings(
       partial.consentFreshMin !== undefined
         ? clampInt(Number(partial.consentFreshMin), 1, 120, current.consentFreshMin)
         : current.consentFreshMin,
+    modelContextWindows:
+      partial.modelContextWindows !== undefined
+        ? cleanWindowMap(partial.modelContextWindows)
+        : current.modelContextWindows,
     injectAllowlist: partial.injectAllowlist !== undefined ? cleanAllowlist(partial.injectAllowlist) : current.injectAllowlist,
     oneShot: partial.oneShot !== undefined ? Boolean(partial.oneShot) : current.oneShot,
     activeSince:

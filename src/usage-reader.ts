@@ -31,6 +31,7 @@ import path from "path";
 import os from "os";
 import readline from "readline";
 import { execFileSync } from "child_process";
+import { readContextWatcherSettings } from "./context-watcher-settings.js";
 
 export const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
@@ -214,7 +215,67 @@ export function modelContextWindow(model: string): number {
 // provably on a >200K (i.e. 1M) window. Below 200K the label is unchanged —
 // correct for a 200K model, harmless for a 1M one — so this only corrects the
 // misleading >100% case. Self-correcting, no config, no transcript internals.
-export function effectiveContextWindow(model: string, contextTokens: number): number {
+// OPERATOR-DECLARED WINDOWS. The 1M-context beta is a request HEADER, and
+// Claude Code's transcripts record the plain family id either way — every
+// transcript on this machine logs "claude-opus-5" / "claude-opus-4-8" and none
+// carries a [1m] marker. So below 200K there is no observable signal, and the
+// same family legitimately runs at 200K for one operator and 1M for another.
+// Guessing 1M by family would silently disarm the watcher for every 200K user;
+// guessing 200K fires on 1M sessions at ~17% real occupancy (the bug this
+// fixes). The only correct answer is to let the operator say which it is.
+//
+// Keys are matched case-insensitively, exact first, then as a substring of the
+// recorded model id so a family key ("opus-5") covers dated variants. The
+// LONGEST matching key wins, so a specific entry ("claude-opus-5-5") overrides
+// a broader one. Empty map (the default) = unchanged legacy behavior.
+function declaredContextWindow(
+  model: string,
+  overrides?: Record<string, number>
+): number | null {
+  const map = overrides ?? readDeclaredWindows();
+  if (!map) return null;
+  const m = (model ?? "").toLowerCase();
+  if (!m) return null;
+  let best: number | null = null;
+  let bestLen = -1;
+  for (const [rawKey, rawVal] of Object.entries(map)) {
+    const key = String(rawKey ?? "").toLowerCase().trim();
+    if (!key) continue;
+    if (m !== key && !m.includes(key)) continue;
+    if (key.length <= bestLen) continue;
+    const val = Number(rawVal);
+    if (!Number.isFinite(val) || val <= 0) continue;
+    best = Math.round(val);
+    bestLen = key.length;
+  }
+  return best;
+}
+
+// Read the declared map from the watcher settings. Fail-soft: a malformed or
+// missing config degrades to legacy inference rather than throwing inside a
+// hot path. The settings module imports only node builtins, so this direction
+// of dependency introduces no cycle.
+function readDeclaredWindows(): Record<string, number> | null {
+  try {
+    const map = readContextWatcherSettings().modelContextWindows;
+    if (!map || typeof map !== "object") return null;
+    return map;
+  } catch {
+    return null;
+  }
+}
+
+export function effectiveContextWindow(
+  model: string,
+  contextTokens: number,
+  overrides?: Record<string, number>
+): number {
+  const declared = declaredContextWindow(model, overrides);
+  if (declared !== null) {
+    // Evidence still outranks the declaration: a session that provably holds
+    // more than the declared window is on the 1M beta regardless of config.
+    return contextTokens > declared ? 1_000_000 : declared;
+  }
   if (contextTokens > 200_000) return 1_000_000;
   return modelContextWindow(model);
 }

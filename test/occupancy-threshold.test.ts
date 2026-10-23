@@ -133,3 +133,120 @@ test("dollarPerTurnThreshold still persists for backward compat (now observabili
   assert.equal(s.contextOccupancyThreshold, 0.42);
   assert.equal(s.dollarPerTurnThreshold, 0.5);
 });
+
+// ---- operator-declared context windows (bug fix 2026-09-29) ----
+//
+// Regression pins for the premature-compact bug: a fleet running the 1M beta
+// had 1M sessions scored against a 200K denominator, so ~17% real occupancy
+// logged as ~85% and crossed the arming gate. The 1M beta is a request header
+// and never reaches the transcript, so the window cannot be inferred below
+// 200K — it has to be declared. These pin BOTH halves: declaring works, and
+// NOT declaring leaves public behavior exactly as it was.
+
+test("public default is unchanged: an undeclared 1M model still reads 200K", () => {
+  reset();
+  // The exact shape that caused the bug. With no declaration the watcher has
+  // no way to know, and must NOT guess 1M — guessing would silently disarm
+  // every operator who really is on a 200K window.
+  assert.equal(effectiveContextWindow("claude-opus-5", 169_188), 200_000);
+  assert.equal(effectiveContextWindow("claude-opus-4-8", 181_851), 200_000);
+});
+
+test("a declared window is honored, which is what fixes the bug", () => {
+  reset();
+  writeContextWatcherSettings({
+    modelContextWindows: { "claude-opus-5": 1_000_000 },
+  });
+  assert.equal(effectiveContextWindow("claude-opus-5", 169_188), 1_000_000);
+});
+
+test("a family key matches dated model ids as a substring", () => {
+  reset();
+  writeContextWatcherSettings({ modelContextWindows: { "opus-5": 1_000_000 } });
+  assert.equal(effectiveContextWindow("claude-opus-5", 169_188), 1_000_000);
+});
+
+test("the longest matching key wins, so a specific entry beats a family one", () => {
+  reset();
+  writeContextWatcherSettings({
+    modelContextWindows: { "opus-5": 1_000_000, "claude-opus-5-5": 200_000 },
+  });
+  assert.equal(effectiveContextWindow("claude-opus-5-5", 150_000), 200_000);
+  assert.equal(effectiveContextWindow("claude-opus-5", 150_000), 1_000_000);
+});
+
+test("observed context still outranks a declaration that contradicts it", () => {
+  reset();
+  writeContextWatcherSettings({
+    modelContextWindows: { "claude-opus-5": 200_000 },
+  });
+  // A 200K model could not have accepted this turn, so the evidence wins.
+  assert.equal(effectiveContextWindow("claude-opus-5", 572_000), 1_000_000);
+});
+
+test("an explicit override argument bypasses settings entirely", () => {
+  reset();
+  assert.equal(
+    effectiveContextWindow("claude-opus-5", 169_188, { "opus-5": 1_000_000 }),
+    1_000_000
+  );
+});
+
+test("malformed declarations are dropped rather than throwing", () => {
+  reset();
+  writeContextWatcherSettings({
+    modelContextWindows: {
+      "": 1_000_000,
+      "claude-opus-5": -5 as unknown as number,
+      "claude-sonnet-4-6": "nope" as unknown as number,
+    },
+  });
+  const s = readContextWatcherSettings();
+  assert.deepEqual(s.modelContextWindows, {});
+  assert.equal(effectiveContextWindow("claude-opus-5", 169_188), 200_000);
+});
+
+test("declared values clamp to a sane token range", () => {
+  reset();
+  writeContextWatcherSettings({
+    modelContextWindows: { tiny: 1_000, huge: 1e12 },
+  });
+  const s = readContextWatcherSettings();
+  assert.equal(s.modelContextWindows.tiny, 50_000);
+  assert.equal(s.modelContextWindows.huge, 2_000_000);
+});
+
+test("settings round-trip preserves the map and partial updates don't clobber it", () => {
+  reset();
+  writeContextWatcherSettings({
+    modelContextWindows: { "claude-opus-5": 1_000_000 },
+  });
+  writeContextWatcherSettings({ contextOccupancyThreshold: 0.8 });
+  const s = readContextWatcherSettings();
+  assert.deepEqual(s.modelContextWindows, { "claude-opus-5": 1_000_000 });
+  assert.equal(s.contextOccupancyThreshold, 0.8);
+});
+
+test("the map defaults to empty so an untouched install declares nothing", () => {
+  reset();
+  assert.deepEqual(readContextWatcherSettings().modelContextWindows, {});
+});
+
+test("keys match the RAW transcript model id, not the shortened log form", () => {
+  reset();
+  // context-watcher.ts logs `model=opus-5` via shortModel(), which strips the
+  // "claude-" prefix for readability. But econ.model — the value actually
+  // passed to effectiveContextWindow — is msg.model verbatim from the
+  // transcript, i.e. "claude-opus-5". Declaring the log form must therefore
+  // still work (it is a substring), and declaring the raw form must work.
+  // Getting this backwards would leave every declaration silently unmatched
+  // while the whole suite stayed green.
+  writeContextWatcherSettings({ modelContextWindows: { "opus-5": 1_000_000 } });
+  assert.equal(effectiveContextWindow("claude-opus-5", 169_188), 1_000_000);
+
+  reset();
+  writeContextWatcherSettings({
+    modelContextWindows: { "claude-opus-5": 1_000_000 },
+  });
+  assert.equal(effectiveContextWindow("claude-opus-5", 169_188), 1_000_000);
+});
