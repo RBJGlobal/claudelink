@@ -403,6 +403,18 @@ Nothing fires mid-work, and nothing fires without a yes. The **Compact** / **Cle
 
 Agents opt into the protection by calling `signal_checkpoint` at natural rest points — *you* decide when it's safe, ClaudeLink decides whether to compact (it gates on size, economics, signal age, idle state, and handoff verification). Keystroke dispatch works for **tmux** and **iTerm2**.
 
+**Who is covered.** Every registered agent is covered by default, so a new terminal or a renamed one is protected with nothing to configure. The Command Center's **Registered agents** table has an **Auto-compact** checkbox per agent: untick it to exclude that agent, tick it to bring it back. The choice is saved immediately.
+
+Each row shows whether that agent is actually protected. If it isn't, for a reason you didn't choose, the row turns **red** with the reason, and a banner above the table counts them. Reasons include: the watcher is off or in observe mode, the terminal can't receive keystrokes (use iTerm2 or tmux), or its context can't be measured. Configs from before this change that use a role allowlist keep working as an allowlist, and the banner offers a one-click **Cover all agents** switch.
+
+Set your context windows in `~/.claudelink/context-watcher.json` so occupancy is measured against the right size. Claude Code doesn't record whether a session runs on a 1M window, so declare it per model:
+
+```json
+"modelContextWindows": { "claude-opus-5": 1000000, "claude-sonnet-5": 1000000 }
+```
+
+A key matches any model id containing it, and the longest match wins. Models you don't list are measured against 200K, unless a session has already grown past 200K.
+
 ---
 
 ## Plan Usage meter — see your subscription quota *(v1.6.0, opt-in)*

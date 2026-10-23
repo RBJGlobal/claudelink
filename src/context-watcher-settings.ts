@@ -29,6 +29,12 @@ function settingsPath(): string {
 }
 
 export type WatcherMode = "observe" | "inject";
+// Who auto-compact covers. "all" (default): every agent, minus injectExclude.
+// "allowlist": only roles on injectAllowlist (the original fail-closed rollout
+// mode). Both lists are edited from the Command Center's per-agent checkbox, so
+// an operator never has to hand-edit role names, and a new or renamed terminal
+// is covered automatically in "all" mode.
+export type InjectScope = "all" | "allowlist";
 
 export interface ContextWatcherSettings {
   enabled: boolean;
@@ -77,6 +83,11 @@ export interface ContextWatcherSettings {
   // so public behavior is unchanged for anyone who never sets it.
   modelContextWindows: Record<string, number>;
   injectAllowlist: string[];
+  injectScope: InjectScope;
+  // Roles the operator unticked in "all" mode. A renamed seat drops off this
+  // list and becomes covered again, which is the safe direction: every
+  // compaction still needs the agent's own consent.
+  injectExclude: string[];
   // One-shot LATCH for armed inject: fire on the first qualifying agent, then
   // auto-disable (set enabled=false) and log loudly. NOT a cooldown — a single
   // demonstration shot, so arming can't become a standing fleet loop by accident.
@@ -103,7 +114,9 @@ const DEFAULTS: ContextWatcherSettings = {
     "Context check (automated): you're at high context occupancy and currently idle. If this is a good moment to /compact, FIRST update your HANDOVER.md / artifacts so nothing is lost, THEN call signal_checkpoint with safe_to_clear=true and your handoff_path to consent — I'll /compact you on the next check. If you're mid-something-heavy, call signal_checkpoint with safe_to_clear=false and a one-line note and I'll hold off.",
   consentFreshMin: 15,
   modelContextWindows: {}, // empty = infer, never declare on the user's behalf
-  injectAllowlist: [], // fail-closed: empty = arm nobody
+  injectAllowlist: [], // used only in "allowlist" scope
+  injectScope: "all",
+  injectExclude: [],
   oneShot: true,
   activeSince: null,
 };
@@ -123,6 +136,16 @@ function cleanWindowMap(v: any): Record<string, number> {
     out[key] = Math.round(Math.max(50_000, Math.min(2_000_000, n)));
   }
   return out;
+}
+
+// A config written before injectScope existed keeps its meaning: a non-empty
+// allowlist was a deliberate opt-in, so it stays "allowlist" until the
+// operator switches (one click in the Command Center). Anything else is "all".
+function resolveScope(parsed: any): InjectScope {
+  if (parsed?.injectScope === "all" || parsed?.injectScope === "allowlist") return parsed.injectScope;
+  return Array.isArray(parsed?.injectAllowlist) && cleanAllowlist(parsed.injectAllowlist).length > 0
+    ? "allowlist"
+    : "all";
 }
 
 function cleanAllowlist(v: any): string[] {
@@ -193,6 +216,8 @@ export function readContextWatcherSettings(): ContextWatcherSettings {
       consentFreshMin: clampInt(Number(parsed.consentFreshMin), 1, 120, DEFAULTS.consentFreshMin),
       modelContextWindows: cleanWindowMap(parsed.modelContextWindows),
       injectAllowlist: cleanAllowlist(parsed.injectAllowlist),
+      injectScope: resolveScope(parsed),
+      injectExclude: cleanAllowlist(parsed.injectExclude),
       oneShot: parsed.oneShot === undefined ? DEFAULTS.oneShot : Boolean(parsed.oneShot),
       activeSince:
         typeof parsed.activeSince === "string" && parsed.activeSince.length > 0
@@ -265,6 +290,9 @@ export function writeContextWatcherSettings(
         ? cleanWindowMap(partial.modelContextWindows)
         : current.modelContextWindows,
     injectAllowlist: partial.injectAllowlist !== undefined ? cleanAllowlist(partial.injectAllowlist) : current.injectAllowlist,
+    injectScope:
+      partial.injectScope === "all" || partial.injectScope === "allowlist" ? partial.injectScope : current.injectScope,
+    injectExclude: partial.injectExclude !== undefined ? cleanAllowlist(partial.injectExclude) : current.injectExclude,
     oneShot: partial.oneShot !== undefined ? Boolean(partial.oneShot) : current.oneShot,
     activeSince:
       partial.activeSince !== undefined
@@ -278,4 +306,59 @@ export function writeContextWatcherSettings(
   fs.writeFileSync(tmp, JSON.stringify(merged, null, 2));
   fs.renameSync(tmp, SETTINGS_PATH);
   return merged;
+}
+
+// ---- Per-agent auto-compact coverage ----
+
+// The operator's intent for one role: is its checkbox ticked?
+export function compactChecked(s: ContextWatcherSettings, role: string): boolean {
+  return s.injectScope === "allowlist" ? s.injectAllowlist.includes(role) : !s.injectExclude.includes(role);
+}
+
+const DISPATCHABLE_APPS = new Set(["tmux", "iterm2"]);
+
+export type CoverageState = "covered" | "excluded" | "blocked";
+export interface CompactCoverage {
+  checked: boolean;
+  state: CoverageState; // covered = protected; excluded = operator's choice; blocked = needs attention
+  reason: string;
+}
+
+// Whether auto-compact can actually reach this agent, and if not, why. Shown
+// per agent in the Command Center so a seat that silently fell out of coverage
+// is visible (red) instead of discovered weeks later as "it stopped compacting".
+export function compactCoverage(
+  s: ContextWatcherSettings,
+  agent: { role: string; tty: string | null; terminal_app: string | null; hasTranscript: boolean }
+): CompactCoverage {
+  const checked = compactChecked(s, agent.role);
+  if (!checked) {
+    return s.injectScope === "allowlist"
+      ? { checked, state: "blocked", reason: "not on the auto-compact allowlist" }
+      : { checked, state: "excluded", reason: "excluded by you" };
+  }
+  if (!s.enabled) return { checked, state: "blocked", reason: "the context watcher is turned off" };
+  if (s.mode !== "inject") return { checked, state: "blocked", reason: "the watcher is in observe mode (logs only)" };
+  if (!agent.tty || !DISPATCHABLE_APPS.has(String(agent.terminal_app))) {
+    return {
+      checked,
+      state: "blocked",
+      reason: `this terminal can't receive /compact (${agent.terminal_app || "unknown"}); use iTerm2 or tmux`,
+    };
+  }
+  if (!agent.hasTranscript) return { checked, state: "blocked", reason: "context can't be measured (no transcript found)" };
+  return { checked, state: "covered", reason: "protected" };
+}
+
+// Tick or untick one agent. Edits whichever list the current scope uses.
+export function setCompactForRole(role: string, enabled: boolean): ContextWatcherSettings {
+  const s = readContextWatcherSettings();
+  if (s.injectScope === "allowlist") {
+    const list = s.injectAllowlist.filter((r) => r !== role);
+    if (enabled) list.push(role);
+    return writeContextWatcherSettings({ injectAllowlist: list });
+  }
+  const ex = s.injectExclude.filter((r) => r !== role);
+  if (!enabled) ex.push(role);
+  return writeContextWatcherSettings({ injectExclude: ex });
 }

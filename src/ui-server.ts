@@ -27,6 +27,9 @@ import {
 import {
   readContextWatcherSettings,
   writeContextWatcherSettings,
+  compactCoverage,
+  setCompactForRole,
+  type CompactCoverage,
 } from "./context-watcher-settings.js";
 import { analyzeCompactEvents } from "./compact-analyzer.js";
 import {
@@ -89,8 +92,12 @@ interface AgentRow {
   pid: number;
   alive: boolean;
   autonomous_reply: number;
+  tty: string | null;
+  terminal_app: string | null;
   msgs_from: number;
   msgs_to: number;
+  // Auto-compact coverage for live agents (checkbox + why it is/isn't protected).
+  compact?: CompactCoverage;
   // Stage 1 — populated by enrichAgentsFleet for alive agents only.
   fleet?: AgentFleetMetrics;
 }
@@ -273,6 +280,7 @@ async function getState(): Promise<{
   agents: AgentRow[];
   health: Health;
   recent_messages: any[];
+  compactWatcher: { enabled: boolean; mode: string; scope: string };
 }> {
   const servers = listClaudelinkServers();
   const db = new Database(DB_PATH(), { readonly: false });
@@ -280,7 +288,7 @@ async function getState(): Promise<{
   const agents = db
     .prepare(
       `SELECT a.id, a.role, a.description, a.registered_at, a.last_seen, a.pid,
-              a.autonomous_reply,
+              a.autonomous_reply, a.tty, a.terminal_app,
               (SELECT COUNT(*) FROM messages m WHERE m.from_agent = a.id) AS msgs_from,
               (SELECT COUNT(*) FROM messages m WHERE m.to_agent   = a.id) AS msgs_to
          FROM agents a
@@ -368,9 +376,24 @@ async function getState(): Promise<{
     /* whole-batch failure → dashboard still renders without fleet column */
   }
 
+  // Per-agent auto-compact coverage. Computed for live agents only; the
+  // Command Center shows a checkbox plus, when protection is off for a reason
+  // the operator didn't choose, a red highlight naming that reason.
+  const cw = readContextWatcherSettings();
+  for (const a of enriched) {
+    if (!a.alive) continue;
+    a.compact = compactCoverage(cw, {
+      role: a.role,
+      tty: a.tty,
+      terminal_app: a.terminal_app,
+      hasTranscript: !!a.fleet,
+    });
+  }
+
   return {
     servers,
     agents: enriched,
+    compactWatcher: { enabled: cw.enabled, mode: cw.mode, scope: cw.injectScope },
     health: {
       total_agents: enriched.length,
       total_messages: totalMessages,
@@ -665,6 +688,15 @@ const HTML = String.raw`<!doctype html>
   .pill.dead  { background: rgba(255,107,107,0.15); color: var(--red); }
   .pill.warn  { background: rgba(255,180,84,0.15); color: var(--amber); }
   .pill.info  { background: rgba(107,177,255,0.15); color: var(--blue); }
+  .pill.muted { background: rgba(120,120,140,0.15); color: var(--muted); }
+  tr.compact-blocked td { background: rgba(255,107,107,0.07); }
+  tr.compact-blocked td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+  .compact-cell { display:flex; flex-direction:column; gap:3px; }
+  .compact-cell .why { font-size:11px; color: var(--muted); max-width: 220px; }
+  tr.compact-blocked .compact-cell .why { color: var(--red); }
+  .compact-alert { display:none; margin: 0 0 10px; padding: 8px 10px; border-radius: 6px; font-size: 13px; background: rgba(255,107,107,0.1); border: 1px solid var(--red); }
+  .compact-alert.show { display:block; }
+  .compact-alert button { margin-left: 8px; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); }
   button.row-action { background: transparent; color: var(--muted); border: 1px solid var(--border); padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 11px; transition: 0.12s; }
   button.row-action:hover { color: var(--text); border-color: #3a4660; }
@@ -842,8 +874,9 @@ const HTML = String.raw`<!doctype html>
   <section class="panel">
     <h2>Registered agents <span class="count" id="agt-count">0</span></h2>
     <div class="body">
+      <div class="compact-alert" id="compact-alert"></div>
       <table id="agt-table">
-        <thead><tr><th>Role</th><th>PID</th><th>Status</th><th>Auto-reply</th><th>Msgs</th><th>Last seen</th><th></th></tr></thead>
+        <thead><tr><th>Role</th><th>PID</th><th>Status</th><th>Auto-reply</th><th>Auto-compact</th><th>Msgs</th><th>Last seen</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -1063,7 +1096,7 @@ function render(state) {
   const ab = $("agt-table").querySelector("tbody");
   ab.innerHTML = "";
   if (state.agents.length === 0) {
-    ab.innerHTML = '<tr><td colspan="7" class="empty">No agents registered.</td></tr>';
+    ab.innerHTML = '<tr><td colspan="8" class="empty">No agents registered.</td></tr>';
   } else {
     for (const a of state.agents) {
       const tr = document.createElement("tr");
@@ -1081,16 +1114,44 @@ function render(state) {
             '<span class="lbl' + (isOn ? ' on' : '') + '">' + (isOn ? 'on' : 'off') + '</span>' +
           '</label>'
         : '<span class="mono">' + (isOn ? 'on' : 'off') + '</span>';
+      let compactCell = '<span class="mono">—</span>';
+      if (a.alive && a.compact) {
+        const c = a.compact;
+        const pill = c.state === "covered" ? '<span class="pill alive">● protected</span>'
+          : c.state === "excluded" ? '<span class="pill muted">● off</span>'
+          : '<span class="pill dead">● not protected</span>';
+        compactCell = '<label class="compact-cell" title="Untick to exclude this agent from auto-compact. Every compaction still asks the agent first.">' +
+          '<span><input type="checkbox" data-compact-id="' + escapeHtml(a.id) + '"' + (c.checked ? ' checked' : '') + ' /> ' + pill + '</span>' +
+          (c.state === "covered" ? '' : '<span class="why">' + escapeHtml(c.reason) + '</span>') +
+        '</label>';
+        if (c.state === "blocked") tr.className = "compact-blocked";
+      }
       tr.innerHTML =
         '<td>' + escapeHtml(a.role) + (a.description ? '<div class="mono">' + escapeHtml(a.description) + '</div>' : "") + '</td>' +
         '<td class="mono">' + a.pid + '</td>' +
         '<td>' + status + '</td>' +
         '<td>' + autoCell + '</td>' +
+        '<td>' + compactCell + '</td>' +
         '<td class="mono">' + msgs + '</td>' +
         '<td class="mono">' + fmtAgo(a.last_seen) + '</td>' +
         '<td>' + action + '</td>';
       ab.appendChild(tr);
     }
+  }
+
+  // Auto-compact alert: any live agent that isn't protected for a reason the
+  // operator didn't choose. Legacy allowlist scope gets a one-click way out.
+  const blocked = state.agents.filter(function (a) { return a.alive && a.compact && a.compact.state === "blocked"; });
+  const alertEl = $("compact-alert");
+  if (blocked.length) {
+    const cwState = state.compactWatcher || {};
+    alertEl.innerHTML = '<strong>' + blocked.length + ' live agent' + (blocked.length === 1 ? ' is' : 's are') + ' not protected by auto-compact:</strong> '
+      + blocked.map(function (a) { return escapeHtml(a.role); }).join(", ") + '. The reason is shown in red on each row.'
+      + (cwState.scope === "allowlist" ? ' <button class="row-action" id="btn-compact-all">Cover all agents (recommended)</button>' : '');
+    alertEl.classList.add("show");
+  } else {
+    alertEl.classList.remove("show");
+    alertEl.innerHTML = "";
   }
 
   // health
@@ -1335,6 +1396,19 @@ $("btn-quit").addEventListener("click", async () => {
 document.addEventListener("change", async (e) => {
   const t = e.target;
   if (!(t instanceof HTMLInputElement)) return;
+  const compactId = t.getAttribute("data-compact-id");
+  if (compactId) {
+    const enabled = t.checked;
+    try {
+      await api("/api/agents/" + encodeURIComponent(compactId) + "/compact", "POST", { enabled });
+      toast("Auto-compact " + (enabled ? "enabled" : "disabled") + " for this agent");
+      refresh();
+    } catch (err) {
+      t.checked = !enabled;
+      toast(err.message, "error");
+    }
+    return;
+  }
   const autonomousId = t.getAttribute("data-autonomous-id");
   if (!autonomousId) return;
   const enabled = t.checked;
@@ -1349,6 +1423,18 @@ document.addEventListener("change", async (e) => {
 });
 
 $("btn-retry-now")?.addEventListener("click", refresh);
+document.addEventListener("click", async (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLElement) || t.id !== "btn-compact-all") return;
+  if (!confirm("Cover every agent with auto-compact? You can untick individual agents afterwards. Each compaction still asks the agent first.")) return;
+  try {
+    await api("/api/context-watcher", "POST", { injectScope: "all" });
+    toast("Auto-compact now covers all agents");
+    refresh();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+});
 
 window.addEventListener("unhandledrejection", (e) => {
   // Suppress noisy console output for network errors from our own polling.
@@ -1807,6 +1893,35 @@ export function startUIServer(port = 7878): http.Server {
         const id = decodeURIComponent(p.slice("/api/remove-stale/".length));
         const ok = removeStaleAgent(id);
         return send(ok ? 200 : 404, { ok });
+      }
+      if (req.method === "POST" && p.startsWith("/api/agents/") && p.endsWith("/compact")) {
+        // Per-agent auto-compact checkbox. Persists to context-watcher.json via
+        // the settings module (the exclude list in "all" scope, the allowlist
+        // in legacy scope), so it survives restarts and needs no hand edits.
+        const id = decodeURIComponent(p.slice("/api/agents/".length, p.length - "/compact".length));
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            if (typeof parsed.enabled !== "boolean") return send(400, { error: "enabled must be a boolean" });
+            const db = new Database(DB_PATH(), { readonly: true });
+            let row: { role: string } | undefined;
+            try {
+              row = db.prepare(`SELECT role FROM agents WHERE id = ? LIMIT 1`).get(id) as any;
+            } finally {
+              db.close();
+            }
+            if (!row) return send(404, { error: "agent not found" });
+            setCompactForRole(row.role, parsed.enabled);
+            if (contextWatcherHandle) contextWatcherHandle.reschedule();
+            send(200, { ok: true, role: row.role, enabled: parsed.enabled });
+          } catch (e: any) {
+            send(400, { error: e.message });
+          }
+        });
+        req.on("error", (e: any) => send(400, { error: e.message }));
+        return;
       }
       if (req.method === "POST" && p.startsWith("/api/agents/") && p.endsWith("/autonomous")) {
         const inner = p.slice("/api/agents/".length, p.length - "/autonomous".length);

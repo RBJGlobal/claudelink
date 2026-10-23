@@ -37,6 +37,7 @@ import {
 } from "./usage-reader.js";
 import {
   readContextWatcherSettings,
+  compactChecked,
   writeContextWatcherSettings,
   ContextWatcherSettings,
   WatcherMode,
@@ -993,17 +994,20 @@ export function startContextWatcher(): ContextWatcherHandle {
             reason: `count=${st.nudgeCount} safety_fresh=${safetyFresh}`,
           });
         } else {
-          // ARMED INJECT (mode "inject"). FAIL-CLOSED ALLOWLIST FIRST: only
-          // roles the operator explicitly put on injectAllowlist are ever
-          // auto-compacted. An empty/unset list arms NO ONE — this is what makes
-          // a standing-on rollout a controlled subset, not fleet-wide. Checked
-          // before the transcript scan so non-listed agents are skipped cheaply.
-          const allowlisted = s.injectAllowlist.includes(a.role);
+          // ARMED INJECT (mode "inject"). COVERAGE FIRST: in "all" scope every
+          // agent is covered unless the operator unticked it in the Command
+          // Center; in legacy "allowlist" scope only listed roles are. Checked
+          // before the transcript scan so uncovered agents are skipped cheaply.
+          // (The log field keeps its historical name, `allowlisted`.)
+          const allowlisted = compactChecked(s, a.role);
           if (!allowlisted) {
             logGateStatus({
               ...(commonFields as GateStatusFields),
               decision: "inject-skip-allowlist",
-              reason: `allowlist=${JSON.stringify(s.injectAllowlist)}`,
+              reason:
+                s.injectScope === "allowlist"
+                  ? `scope=allowlist allowlist=${JSON.stringify(s.injectAllowlist)}`
+                  : "scope=all excluded-by-operator",
               allowlisted: false,
             });
             continue;
