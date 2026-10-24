@@ -439,6 +439,32 @@ ANTHROPIC_BASE_URL="http://127.0.0.1:8788" claude
 
 > **Do not** bake `ANTHROPIC_BASE_URL` into `~/.claude/settings.json` or your shell profile. If the proxy isn't running, every session pointed at it hangs on connection-refused. An ephemeral per-shell export (or a small shell function that checks the proxy is alive first) fails safe.
 
+**Recommended: a `claude-metered` launcher.** Add this to `~/.zshrc` (or `~/.bashrc`). It scopes the variable to one Claude process and refuses to start if the proxy is down, so you never get the hang:
+
+```bash
+claude-metered() {
+  local lock="$HOME/.claudelink/quota-proxy.lock" pid
+  [ -f "$lock" ] || { echo "proxy off — run: claudelink usage --on" >&2; return 1; }
+  pid=$(sed -n 's/.*"pid":[[:space:]]*\([0-9]*\).*/\1/p' "$lock")
+  if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+    echo "proxy lock is stale — run: claudelink usage --on" >&2; return 1
+  fi
+  ANTHROPIC_BASE_URL="http://127.0.0.1:8788" claude "$@"
+}
+```
+
+Then use `claude-metered` anywhere you'd type `claude`; it takes the same arguments.
+
+**Metering a session that's already running.** You don't lose anything by switching. Exit the session (Ctrl-C twice, or `/exit`), note the session ID Claude Code prints, and relaunch it through the proxy:
+
+```bash
+claude-metered --resume <session-id>     # or: claude-metered --continue  (most recent session in this folder)
+```
+
+The conversation picks up exactly where it was. Re-register the agent on the mesh afterward if it doesn't do so on its own.
+
+**Which terminals to meter.** One is enough, because the quota is per account, not per terminal. Pick your **busiest** one. The meter only updates when a metered terminal sends a request, so a terminal that sits idle for an hour leaves the tile an hour old. After 30 minutes without a fresh reading the tile dims and says so instead of passing old numbers off as current. Metering more terminals keeps it fresher. The trade-off is that every metered terminal depends on the proxy staying up; if it stops, restart it with `claudelink usage --on`.
+
 **Security contract** — this is an auth-path component, so the rules are strict and the code is short enough to audit in one sitting:
 
 - Your auth token is **forwarded verbatim, never read, parsed, or logged**.
