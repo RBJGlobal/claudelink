@@ -778,6 +778,24 @@ Almost always one of three things:
 
 Check what is installed with `npm ls -g claudelink`.
 
+### I see "UserPromptSubmit hook [… cc-status] timed out after 5s" with many agents running
+
+This warning is not from ClaudeLink. It comes from **iTerm2's own Claude Code integration** (iTerm2 > Install Claude Code Integration), which adds a `cc-status` hook to ten Claude Code events in `~/.claude/settings.json`, including `PreToolUse` and `PostToolUse`. Those fire on every tool call in every session. With many busy agents, iTerm2 can fall behind and the hook misses its 5-second limit. Because the machine is then overloaded, other hooks (ClaudeLink's included) may time out in the same second.
+
+It is harmless: Claude Code still runs your prompt, and only iTerm2's status-indicator update is dropped. If it bothers you, remove the integration:
+
+1. In iTerm2, choose **iTerm2 > Uninstall Claude Code Integration…** and confirm.
+2. iTerm2's uninstaller may report that some hook commands "mention cc-status but also run other programs" and leave them in place. If so, open `~/.claude/settings.json` and delete every hook whose command contains `cc-status`. Back the file up first, and leave your other hooks alone. In `settings.json`, the commands look like this:
+
+   ```
+   IFS= read -r -t 2 L; printf '%s' "$L" | ~/.config/iterm2/cc-status
+   ```
+
+3. Restart any Claude Code sessions that are already open, since they keep the old hooks until they restart.
+4. If iTerm2 later offers to enable the Claude Code integration, decline. To bring it back, use **iTerm2 > Install Claude Code Integration**.
+
+You lose iTerm2's Claude-specific tab indicators. ClaudeLink's auto-nudge and auto-compact don't depend on them.
+
 ### Wait, does `npx claudelink init` start any of the CLIs?
 
 **No.** `claudelink init` is a one-time setup command. It writes the appropriate config file (`.mcp.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`, `~/.config/goose/config.yaml`) telling each CLI to connect to ClaudeLink on startup. After that, you never need to run it again — your daily workflow is whatever you'd normally do:
