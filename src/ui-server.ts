@@ -676,7 +676,7 @@ const HTML = String.raw`<!doctype html>
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
   .panel h2 .count { background: var(--panel-2); color: var(--text); padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-  .panel .body { padding: 0; }
+  .panel .body { padding: 0; overflow-x: auto; }
   .panel.full { grid-column: 1 / -1; }
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: 10px 16px; text-align: left; font-size: 12px; border-bottom: 1px solid var(--border); }
@@ -861,7 +861,7 @@ const HTML = String.raw`<!doctype html>
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel full">
     <h2>Running servers <span class="count" id="srv-count">0</span></h2>
     <div class="body">
       <table id="srv-table">
@@ -871,7 +871,7 @@ const HTML = String.raw`<!doctype html>
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel full">
     <h2>Registered agents <span class="count" id="agt-count">0</span></h2>
     <div class="body">
       <div class="compact-alert" id="compact-alert"></div>
@@ -1816,7 +1816,7 @@ async function loadQuota() {
     setPlanMeter($("plan-fable-pct"), $("plan-fable-bar"), $("plan-fable-reset"), q.fable, now, fr.fableExpired);
     if (!fr.fableExpired) {
       const fAgeMin = Math.round((now - q.fable.capturedAtMs) / 60000);
-      $("plan-fable-reset").textContent += " · as of " + fmtAgo(fAgeMin);
+      $("plan-fable-reset").textContent += " · as of " + fmtAgoMin(fAgeMin);
     }
   } else {
     fableMeter.style.display = "none";
@@ -1838,10 +1838,10 @@ async function loadQuota() {
       : "The usage proxy is stopped. Run <span class='mono'>claudelink usage --on</span>, then start a terminal with <span class='mono'>claude-metered</span>.")
   );
   $("plan-usage-foot").innerHTML =
-    "As of " + when + " (" + fmtAgo(ageMin) + ")"
+    "As of " + when + " (" + fmtAgoMin(ageMin) + ")"
     + ". Local-only, read from ~/.claudelink/quota.json — never leaves this machine.";
 }
-function fmtAgo(min) {
+function fmtAgoMin(min) {
   if (min < 60) return min + "m ago";
   if (min < 48 * 60) return Math.round(min / 60) + "h ago";
   return Math.round(min / 1440) + "d ago";
