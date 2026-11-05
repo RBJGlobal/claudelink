@@ -464,15 +464,23 @@ export class NexusDB {
     return targets;
   }
 
+  // A broadcast is fanned out into one row per recipient. A single shared
+  // to_agent=NULL row has one `read` flag, so the first agent to read it
+  // marked it read for everyone else and the rest never saw it.
   broadcastMessage(fromId: string, content: string, opts: SendOptions = {}): void {
     const expectsReply = opts.expectsReply !== false ? 1 : 0;
     const parentId = opts.parentMessageId ?? null;
-    this.db
-      .prepare(
-        `INSERT INTO messages (from_agent, to_agent, content, priority, expects_reply, parent_id)
-         VALUES (?, NULL, ?, 'normal', ?, ?)`
-      )
-      .run(fromId, content, expectsReply, parentId);
+    const insert = this.db.prepare(
+      `INSERT INTO messages (from_agent, to_agent, content, priority, expects_reply, parent_id)
+       VALUES (?, ?, ?, 'normal', ?, ?)`
+    );
+    const fanOut = this.db.transaction(() => {
+      const targets = this.db
+        .prepare(`SELECT id FROM agents WHERE id != ?`)
+        .all(fromId) as Array<{ id: string }>;
+      for (const t of targets) insert.run(fromId, t.id, content, expectsReply, parentId);
+    });
+    fanOut();
   }
 
   // Read-only inbox inspection. Returns unread messages addressed to this

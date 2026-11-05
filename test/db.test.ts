@@ -478,3 +478,17 @@ test("setManualAction/clearManualAction return false for an unknown agent", () =
   assert.equal(db.setManualAction("no-such-id", "compact"), false);
   assert.equal(db.clearManualAction("no-such-id"), false);
 });
+
+test("broadcastMessage reaches every other agent independently (one read does not consume the rest)", () => {
+  const db = freshDb();
+  const reg = (role: string, tty: string) =>
+    db.registerAgent(role, null, process.pid, { tty, terminalApp: "iterm2", paneId: null } as any);
+  const a = reg("a", "/dev/ttys901");
+  const b = reg("b", "/dev/ttys902");
+  const c = reg("c", "/dev/ttys903");
+  db.broadcastMessage(a, "hello all");
+  assert.equal(db.readInbox(b).length, 1);
+  assert.equal(db.readInbox(c).length, 1, "c still gets it after b read it");
+  assert.equal(db.readInbox(a).length, 0, "sender does not receive its own broadcast");
+  assert.equal(db.readInbox(b).length, 0, "already read");
+});
