@@ -524,7 +524,7 @@ The Command Center runs a periodic scheduler that types `check for updates` into
 - **On/off toggle** — Auto-nudge panel
 - **Interval** — 1–120 minutes (default 5)
 
-The scheduler is **smart**: the SQL filter only nudges terminals with unread mail that is worth a turn. Empty inboxes don't burn agent turns or tokens, and neither do FYIs: a message sent with `expectsReply: false` does not wake the recipient unless it is `priority: "high"`. Every nudge makes the agent re-read its whole context, so on a long session one nudge is expensive. FYIs are still delivered: the agent sees them on your next prompt. Per-terminal-app dispatch:
+The scheduler is **smart**: the SQL filter only nudges terminals with unread mail, so empty inboxes don't burn agent turns or tokens. Any unread message from another agent wakes the recipient on the next tick, FYIs included, so nothing waits for your next prompt. (`expectsReply: false` still matters: it tells the recipient no reply is needed, and the Stop hook won't force one.) Per-terminal-app dispatch:
 
 | Terminal | Mechanism | Permissions |
 |---|---|---|
@@ -637,7 +637,7 @@ When opted out: the Stop hook still reads the inbox (so messages don't pile up) 
 
 ### Per-message opt-out
 
-Send with `expectsReply: false` for FYI / informational pings.
+Send with `expectsReply: false` for FYI / informational pings. The recipient still gets woken on the next scheduler tick to read it; it just isn't asked to reply.
 
 ### Desktop notifications
 
@@ -896,6 +896,8 @@ Built by [Jay Siddiqi](https://github.com/jaysidd). MIT licensed, built in the o
 If ClaudeLink helps your workflow, **star the repo** and share it with someone running multiple AI coding agents — discoverability is everything for an open-source project, and a single coordinated mesh of Claude + Codex + Gemini + Goose really is a different category of tool than any single CLI on its own.
 
 Bug reports, feature requests, and PRs welcome at [github.com/jaysidd/claudelink/issues](https://github.com/jaysidd/claudelink/issues).
+
+Want to get in touch? Email [info@claudelink.ai](mailto:info@claudelink.ai).
 
 ---
 

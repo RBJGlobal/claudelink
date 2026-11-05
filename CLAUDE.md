@@ -12,6 +12,8 @@
 
 *Iterative; if you escalate on something the policy says is Sonnet, capture it for the next calibration pass.*
 
+Subagent delegation: see the Model delegation protocol in ~/.claude/CLAUDE.md.
+
 ## Project layout
 
 ClaudeLink is a Node + TypeScript MCP server with a SQLite shared-state DB and a local web Command Center.

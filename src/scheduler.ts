@@ -129,21 +129,16 @@ export function injectKeystroke(c: NudgeCandidate, text: string): "ok" | "skip" 
   }
 }
 
-// Which unread messages are worth WAKING an agent for. A nudge makes the
-// recipient take a full turn, and every turn re-reads the agent's entire
-// context, so on a large-window session one nudge can cost hundreds of
-// thousands of tokens of quota. FYI messages (expects_reply = 0) don't need
-// that: the UserPromptSubmit hook surfaces them on the operator's next
-// prompt, and the Stop hook already skips them for the same reason.
-// priority = 'high' still wakes, so an explicit wake-up or urgent FYI works.
-export const NUDGE_WORTHY_SQL = `(m.expects_reply = 1 OR m.priority = 'high')`;
+// Every unread message from another agent wakes the recipient, FYIs
+// included: an agent that waits for the operator's next prompt can sit on a
+// task indefinitely when the sender mislabels it as an FYI. Messages an
+// agent sent to itself never wake it.
 
 // Exported for testability.
 export function selectCandidates(db: Database.Database): NudgeCandidate[] {
   // Live agents with a known TTY, autonomous_reply on, and at least one
-  // nudge-worthy unread message addressed to them (or unaddressed
-  // broadcast). The EXISTS subquery means no nudge fires if there's nothing
-  // worth waking for.
+  // unread message addressed to them (or unaddressed broadcast). The EXISTS
+  // subquery means no nudge fires for an empty inbox.
   const rows = db
     .prepare(
       `SELECT a.id, a.role, a.tty, a.terminal_app, a.pane_id, a.pid
@@ -155,7 +150,6 @@ export function selectCandidates(db: Database.Database): NudgeCandidate[] {
            WHERE m.read = 0
              AND m.from_agent != a.id
              AND (m.to_agent = a.id OR m.to_agent IS NULL)
-             AND ${NUDGE_WORTHY_SQL}
          )`
     )
     .all() as NudgeCandidate[];
@@ -167,7 +161,7 @@ export function selectCandidates(db: Database.Database): NudgeCandidate[] {
 // Stop hook firing concurrently) already consumed the only unread row.
 // SQL mirrors the EXISTS clause in selectCandidates exactly so the
 // "is this agent still eligible?" semantics match the original filter.
-// Returns true if the agent has nudge-worthy unread mail right NOW.
+// Returns true if the agent has unread mail right NOW.
 export function hasUnreadMail(db: Database.Database, agentId: string): boolean {
   const row = db
     .prepare(
@@ -175,7 +169,6 @@ export function hasUnreadMail(db: Database.Database, agentId: string): boolean {
        WHERE m.read = 0
          AND m.from_agent != ?
          AND (m.to_agent = ? OR m.to_agent IS NULL)
-         AND ${NUDGE_WORTHY_SQL}
        LIMIT 1`
     )
     .get(agentId, agentId);

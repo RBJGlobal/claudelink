@@ -23,3 +23,10 @@ docs/assets/
 compact-analysis.json
 fleet-token-meter.png
 
+
+# Founder Command Center knowledge files — private, live in claudelink-internal
+PRODUCT.md
+architecture.md
+docs/decisions.md
+docs/setup-ledger.md
+docs/runbooks/
