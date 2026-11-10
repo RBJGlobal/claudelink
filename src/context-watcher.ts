@@ -873,7 +873,7 @@ export function startContextWatcher(): ContextWatcherHandle {
           // (~30s) retries instead of stalling a full cooldown — bounded by the
           // manual TTL. Without this, one timed-out inject silently parks the
           // terminal for the whole cooldown.
-          if (result !== "fail") st.lastAskedAt = now; // "unknown" may have landed: do not re-ask
+          if (result !== "fail" && result !== "unknown") st.lastAskedAt = now; // a duplicate ASK is harmless, a stalled ask is not: retry on unknown
           state.set(a.id, st);
           logGateStatus({
             ...(mFields as GateStatusFields),
