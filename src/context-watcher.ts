@@ -873,7 +873,7 @@ export function startContextWatcher(): ContextWatcherHandle {
           // (~30s) retries instead of stalling a full cooldown — bounded by the
           // manual TTL. Without this, one timed-out inject silently parks the
           // terminal for the whole cooldown.
-          if (result !== "fail") st.lastAskedAt = now;
+          if (result !== "fail") st.lastAskedAt = now; // "unknown" may have landed: do not re-ask
           state.set(a.id, st);
           logGateStatus({
             ...(mFields as GateStatusFields),
@@ -888,7 +888,9 @@ export function startContextWatcher(): ContextWatcherHandle {
         // keystroke, so one yes maps to one action and a failed inject is retried
         // next tick instead of silently dropped.
         const result = injectKeystroke(candidate, action.command);
-        if (result === "ok") {
+        // "unknown" = osascript timed out but iTerm may have typed it. Treat as
+        // fired: retrying is what typed /compact repeatedly. One click, one try.
+        if (result === "ok" || result === "unknown") {
           consumeConsent(a.id);
           clearManualAction(a.id);
           summary.injected++;
@@ -1190,7 +1192,7 @@ export function startContextWatcher(): ContextWatcherHandle {
           // preserves the consent for a legitimate retry instead of silently
           // burning it (oneShot's latch masks this today, but non-oneShot
           // would otherwise drop the compact entirely).
-          if (result === "ok") consumeConsent(a.id);
+          if (result === "ok" || result === "unknown") consumeConsent(a.id);
           summary.injected++;
           st.lastNudgedAt = now;
           st.nudgeCount++;

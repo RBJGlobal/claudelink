@@ -60,7 +60,14 @@ function escapeForAppleScript(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-export function injectKeystroke(c: NudgeCandidate, text: string): "ok" | "skip" | "fail" {
+// Result meanings: "ok" delivered; "skip" can never be delivered (unsupported
+// terminal); "fail" definitely not delivered; "unknown" the dispatcher timed
+// out AFTER handing the keystroke to the terminal, so it may well have landed.
+// iTerm2 queues `write text` behind TUI rendering, so osascript can be killed at
+// the timeout while the text still arrives. Callers that type an irreversible
+// command (/compact, /clear) must NOT retry on "unknown": that is what typed
+// /compact seven times into one terminal.
+export function injectKeystroke(c: NudgeCandidate, text: string): "ok" | "skip" | "fail" | "unknown" {
   const app = (c.terminal_app || "").toLowerCase();
   try {
     if (app === "tmux") {
@@ -125,6 +132,11 @@ export function injectKeystroke(c: NudgeCandidate, text: string): "ok" | "skip" 
     logLine(
       `fail role=${c.role} tty=${c.tty} terminal_app="${c.terminal_app}" error="${err?.message ?? String(err)}"`
     );
+    const code = err?.code ?? "";
+    const msg = String(err?.message ?? "");
+    if (app === "iterm2" && (code === "ETIMEDOUT" || /ETIMEDOUT/.test(msg))) {
+      return "unknown";
+    }
     return "fail";
   }
 }
