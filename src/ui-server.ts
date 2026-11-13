@@ -5,6 +5,7 @@ import fs from "fs";
 import { execFileSync } from "child_process";
 import Database from "better-sqlite3";
 import { startScheduler, SchedulerHandle } from "./scheduler.js";
+import { startRebuildJob, RebuildHandle } from "./rebuild-job.js";
 import {
   startRecoveryWatcher,
   RecoveryWatcherHandle,
@@ -1877,6 +1878,7 @@ export function startUIServer(port = 7878): http.Server {
   let schedulerHandle: SchedulerHandle | null = null;
   let recoveryWatcherHandle: RecoveryWatcherHandle | null = null;
   let contextWatcherHandle: ContextWatcherHandle | null = null;
+  let rebuildJobHandle: RebuildHandle | null = null;
   const server = http.createServer(async (req, res) => {
     const send = (status: number, body: any, contentType = "application/json") => {
       res.statusCode = status;
@@ -2241,6 +2243,7 @@ export function startUIServer(port = 7878): http.Server {
     schedulerHandle = startScheduler();
     recoveryWatcherHandle = startRecoveryWatcher();
     contextWatcherHandle = startContextWatcher();
+    rebuildJobHandle = startRebuildJob();
   }
 
   const writeLock = () => {
@@ -2266,6 +2269,7 @@ export function startUIServer(port = 7878): http.Server {
     if (schedulerHandle) schedulerHandle.stop();
     if (recoveryWatcherHandle) recoveryWatcherHandle.stop();
     if (contextWatcherHandle) contextWatcherHandle.stop();
+    if (rebuildJobHandle) rebuildJobHandle.stop();
     cleanup();
   };
   process.on("SIGTERM", () => { stopAll(); process.exit(0); });
