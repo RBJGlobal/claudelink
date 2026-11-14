@@ -281,7 +281,7 @@ async function getState(): Promise<{
   agents: AgentRow[];
   health: Health;
   recent_messages: any[];
-  compactWatcher: { enabled: boolean; mode: string; scope: string };
+  compactWatcher: { enabled: boolean; mode: string; scope: string; threshold: number };
 }> {
   const servers = listClaudelinkServers();
   const db = new Database(DB_PATH(), { readonly: false });
@@ -394,7 +394,7 @@ async function getState(): Promise<{
   return {
     servers,
     agents: enriched,
-    compactWatcher: { enabled: cw.enabled, mode: cw.mode, scope: cw.injectScope },
+    compactWatcher: { enabled: cw.enabled, mode: cw.mode, scope: cw.injectScope, threshold: cw.contextOccupancyThreshold },
     health: {
       total_agents: enriched.length,
       total_messages: totalMessages,
@@ -886,6 +886,13 @@ const HTML = String.raw`<!doctype html>
   <section class="panel full">
     <h2>Fleet — live context <span class="count" id="fleet-count">0</span></h2>
     <div class="body">
+      <div class="cw-threshold" style="display:flex;align-items:center;gap:8px;margin:0 0 10px;font-size:13px;flex-wrap:wrap">
+        <label for="cw-threshold-input"><strong>Auto-compact prompt at</strong></label>
+        <input type="number" id="cw-threshold-input" min="10" max="95" step="1" style="width:64px" />
+        <span>% of the context window (all agents)</span>
+        <button class="row-action" id="btn-cw-threshold">Save</button>
+        <span class="nudge-hint" style="margin:0">An idle agent above this is asked to hand over and consent, then compacted. Lower = compacts earlier. 10 to 95.</span>
+      </div>
       <table id="fleet-table" class="fleet-tbl">
         <thead><tr>
           <th>Role</th>
@@ -1140,6 +1147,11 @@ function render(state) {
     }
   }
 
+  const thrEl = $("cw-threshold-input");
+  if (thrEl && document.activeElement !== thrEl && state.compactWatcher && state.compactWatcher.threshold != null) {
+    thrEl.value = String(Math.round(state.compactWatcher.threshold * 100));
+  }
+
   // Auto-compact alert: any live agent that isn't protected for a reason the
   // operator didn't choose. Legacy allowlist scope gets a one-click way out.
   const blocked = state.agents.filter(function (a) { return a.alive && a.compact && a.compact.state === "blocked"; });
@@ -1390,7 +1402,27 @@ document.addEventListener("click", async (e) => {
   }
 });
 
-$("btn-refresh").addEventListener("click", refresh);
+let refreshBtnTimer = null;
+$("btn-refresh").addEventListener("click", async () => {
+  const btn = $("btn-refresh");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = "Refreshing…";
+  clearTimeout(refreshBtnTimer);
+  pointerHeld = false; // a manual refresh must always redraw
+  const t0 = Date.now();
+  // wait out an in-flight poll so this click fetches fresh data, not a skipped call
+  while (refreshInFlight && Date.now() - t0 < 5000) await new Promise(r => setTimeout(r, 50));
+  let ok = true;
+  const failsBefore = consecutiveFailures;
+  await refresh();
+  if (consecutiveFailures > failsBefore) ok = false;
+  const wait = Math.max(0, 600 - (Date.now() - t0)); // visible even when instant
+  await new Promise(r => setTimeout(r, wait));
+  btn.textContent = ok ? "Refreshed ✓ " + new Date().toLocaleTimeString() : "Refresh failed";
+  btn.disabled = false;
+  refreshBtnTimer = setTimeout(() => { btn.textContent = "Refresh"; }, 3000);
+});
 $("btn-kill-all").addEventListener("click", async () => {
   if (!confirm("Kill ALL claudelink-server processes? This will disrupt every Claude Code session using ClaudeLink.")) return;
   try {
@@ -1442,6 +1474,20 @@ document.addEventListener("change", async (e) => {
     setTimeout(refresh, 0);
   } catch (err) {
     t.checked = !enabled;
+    toast(err.message, "error");
+  }
+});
+
+$("btn-cw-threshold")?.addEventListener("click", async () => {
+  const el = $("cw-threshold-input");
+  const pct = Math.round(Number(el.value));
+  if (!Number.isFinite(pct) || pct < 10 || pct > 95) { toast("Enter a whole number from 10 to 95", "error"); return; }
+  try {
+    await api("/api/context-watcher", "POST", { contextOccupancyThreshold: pct / 100 });
+    toast("Auto-compact prompt now at " + pct + "%");
+    el.blur();
+    refresh();
+  } catch (err) {
     toast(err.message, "error");
   }
 });
