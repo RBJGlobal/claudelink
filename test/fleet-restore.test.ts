@@ -73,7 +73,7 @@ test("match: no pane in the folder stays unmatched, no pane used twice", () => {
 
 // ---- planRestore: what --go would type ------------------------------------
 
-import { planRestore, Match as M2 } from "../src/fleet-restore.js";
+import { planRestore, Match as M2, resumeMode } from "../src/fleet-restore.js";
 
 const SID = "38f9d94b-1c1f-4cd6-b8aa-326ba3b93540";
 function mk(over: {
@@ -164,4 +164,20 @@ test("resumeCheck: anything else is left alone, never typed over", () => {
   assert.equal(resumeCheck(true, null, SID), "leave"); // pane unreadable
   assert.equal(resumeCheck(true, "user@host proj % cd '/x' && claude-meter", SID), "leave"); // partly typed
   assert.equal(resumeCheck(true, "claude-metered: usage proxy not running. Start it", SID), "leave");
+});
+
+test("planRestore: plain mode types plain claude, same checked values", () => {
+  const m = mk({});
+  const metered = planRestore([m]).actions[0].command;
+  const plain = planRestore([m], { plain: true }).actions[0].command;
+  assert.ok(metered.includes("&& claude-metered --resume "));
+  assert.equal(plain, metered.replace("claude-metered", "claude"));
+});
+
+test("resumeMode: flag wins, proxy up is metered, never set up is plain, set up but down refuses", () => {
+  assert.equal(resumeMode({ plainFlag: true, proxyUp: true, usageSetUp: true }), "plain");
+  assert.equal(resumeMode({ plainFlag: false, proxyUp: true, usageSetUp: true }), "metered");
+  assert.equal(resumeMode({ plainFlag: false, proxyUp: true, usageSetUp: false }), "metered");
+  assert.equal(resumeMode({ plainFlag: false, proxyUp: false, usageSetUp: false }), "plain");
+  assert.equal(resumeMode({ plainFlag: false, proxyUp: false, usageSetUp: true }), "refuse");
 });

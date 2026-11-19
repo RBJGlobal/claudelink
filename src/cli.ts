@@ -533,7 +533,7 @@ function showHelp() {
     restore                    Preview which iTerm2 pane each agent would be
                                resumed in after a restart. Read-only: types
                                nothing.
-    restore --go [--only "A,B"] [--allow-medium] [--batch N]
+    restore --go [--only "A,B"] [--allow-medium] [--batch N] [--plain]
                                Resume each matched agent: types the resume
                                command into panes that sit at a shell prompt,
                                then asks each to register. Busy panes and
@@ -1223,23 +1223,14 @@ switch (command) {
         : snap.agents;
       const matches = fr.matchPanes(agents, panes);
       console.log(fr.formatPreview(matches, panes, snap));
-      const plan = fr.planRestore(matches, { only, allowMedium: args.includes("--allow-medium") });
-      console.log("");
-      console.log(go ? "Restoring:" : "With --go this would type:");
-      for (const a of plan.actions) console.log(`  ${a.role} -> ${a.tty}\n      ${a.command}\n      ${a.registerText}`);
-      if (plan.actions.length === 0) console.log("  (nothing)");
-      if (plan.skipped.length) {
-        console.log("Skipped:");
-        for (const s of plan.skipped) console.log(`  ${s.role}: ${s.reason}`);
-      }
-      if (!go || plan.actions.length === 0) return;
-      // The resume command runs claude-metered, which needs the usage proxy.
-      // After a reboot the proxy is down and its lock file is stale, so test
-      // the port itself, not the lock's pid (a pid can be reused).
+      // The metered resume command needs the usage proxy. After a reboot the
+      // proxy is down and its lock file is stale, so test the port itself,
+      // not the lock's pid (a pid can be reused).
+      const nexusDir = path.join(os.homedir(), ".claudelink");
       const proxyUp = await new Promise<boolean>((resolve) => {
         let port = 8788;
         try {
-          const lock = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claudelink", "quota-proxy.lock"), "utf8"));
+          const lock = JSON.parse(fs.readFileSync(path.join(nexusDir, "quota-proxy.lock"), "utf8"));
           if (Number.isInteger(lock?.port)) port = lock.port;
         } catch { /* default port */ }
         const sock = require("net").connect({ host: "127.0.0.1", port });
@@ -1248,9 +1239,34 @@ switch (command) {
         sock.once("connect", () => done(true));
         sock.once("error", () => done(false));
       });
-      if (!proxyUp) {
-        console.error("\n  The usage proxy is not running, so nothing was typed.");
-        console.error("  Start it with:  claudelink usage --on   then run this command again.");
+      // Plan Usage counts as set up if it ever ran here: it leaves a lock or a reading.
+      const usageSetUp = fs.existsSync(path.join(nexusDir, "quota-proxy.lock")) || fs.existsSync(path.join(nexusDir, "quota.json"));
+      const mode = fr.resumeMode({ plainFlag: args.includes("--plain"), proxyUp, usageSetUp });
+      const plan = fr.planRestore(matches, { only, allowMedium: args.includes("--allow-medium"), plain: mode === "plain" });
+      console.log("");
+      console.log(go ? "Restoring:" : "With --go this would type:");
+      for (const a of plan.actions) console.log(`  ${a.role} -> ${a.tty}\n      ${a.command}\n      ${a.registerText}`);
+      if (plan.actions.length === 0) console.log("  (nothing)");
+      if (plan.skipped.length) {
+        console.log("Skipped:");
+        for (const s of plan.skipped) console.log(`  ${s.role}: ${s.reason}`);
+      }
+      if (plan.actions.length && mode === "plain") {
+        console.log("");
+        console.log("  Resuming with plain `claude` (no Plan Usage meter). Your sessions come back");
+        console.log("  the same; the Command Center's Plan Usage tile just gets no readings from them.");
+        console.log("  To meter them: claudelink usage --on, add the claude-metered function from the");
+        console.log("  README, and run restore without --plain.");
+      }
+      if (plan.actions.length && mode === "refuse") {
+        console.log("");
+        console.log("  Plan Usage is set up on this machine but its proxy is not running.");
+        console.log("  Start it:        claudelink usage --on     then run this command again.");
+        console.log("  Or skip the meter for this restore:  add --plain");
+      }
+      if (!go || plan.actions.length === 0) return;
+      if (mode === "refuse") {
+        console.error("\n  Nothing was typed.");
         process.exitCode = 1;
         return;
       }

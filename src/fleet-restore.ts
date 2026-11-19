@@ -300,6 +300,7 @@ export function formatPreview(matches: Match[], panes: Pane[], snap: Snapshot): 
 export interface RestoreOptions {
   only?: string[]; // role names; empty or missing = every agent
   allowMedium?: boolean; // also act on "medium" matches
+  plain?: boolean; // resume with plain `claude`, not the metered launcher
 }
 
 export interface RestoreAction {
@@ -322,6 +323,19 @@ const SESSION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const ROLE_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}$/;
 const PATH_RE = /^\/[A-Za-z0-9 ._\/@+-]*$/;
 
+// Pure: which launcher the resume command uses.
+//   "metered": through the Plan Usage proxy (claude-metered).
+//   "plain":   plain `claude`. Chosen by --plain, or on a machine where Plan
+//              Usage was never set up.
+//   "refuse":  Plan Usage is set up here but the proxy is down. Typing plain
+//              `claude` would silently take the whole fleet off the meter, so
+//              the operator decides: start the proxy, or pass --plain.
+export function resumeMode(o: { plainFlag: boolean; proxyUp: boolean; usageSetUp: boolean }): "metered" | "plain" | "refuse" {
+  if (o.plainFlag) return "plain";
+  if (o.proxyUp) return "metered";
+  return o.usageSetUp ? "refuse" : "plain";
+}
+
 // Pure: decides what would be typed where. No I/O.
 export function planRestore(matches: Match[], opts: RestoreOptions = {}): RestorePlan {
   const only = (opts.only ?? []).map((r) => r.trim().toLowerCase()).filter(Boolean);
@@ -342,7 +356,7 @@ export function planRestore(matches: Match[], opts: RestoreOptions = {}): Restor
     plan.actions.push({
       role: a.role,
       tty: m.pane.tty,
-      command: `cd '${a.cwd}' && claude-metered --resume ${a.sessionId}`,
+      command: `cd '${a.cwd}' && ${opts.plain ? "claude" : "claude-metered"} --resume ${a.sessionId}`,
       registerText: `Register yourself as ${a.role}, then read your handoff and resume.`,
     });
   }

@@ -360,6 +360,7 @@ The Command Center is a local web UI at `http://127.0.0.1:7878` — a live conso
 | **Recovery Watcher** *(v1.4.0+)* | Detects Anthropic API rate-limit / overload errors in agent terminals and types a recovery prompt automatically. Configurable poll interval, cooldown, and escalate-to-desktop-notification threshold. See [Recovery Watcher](#3-recovery-watcher-api-error-auto-recovery) below. |
 | **Fleet — live context** *(v1.5.0+)* | Per-agent context occupancy, $/turn, handoff freshness and last-signal age, sorted most-urgent-first. Per-row **Copy prompt**, **Compact**, and **Clear** — an on-demand, consent-gated handshake to act on a heavy terminal. See [Fleet live context](#fleet-live-context--on-demand-compaction-v150) below. |
 | **Plan Usage** *(v1.6.0+, opt-in)* | Your Claude subscription's real quota — session (5-hour), weekly, and frontier-model weekly pool — as live meters with reset countdowns, without opening Claude Desktop → Settings. Off by default; `claudelink usage --on` to enable. See [Plan Usage meter](#plan-usage-meter--see-your-subscription-quota-v160-opt-in) below. |
+| **Prepare for restart** *(v1.6.13+)* | One button in the header. Types a prompt into every live terminal asking the agent to bring its handoff up to date, then shows who has confirmed ("7 of 11 ready"). A terminal the prompt could not reach is listed as **Not reached**, with a **Retry not reached** button. See [Fleet restore](#fleet-restore--bring-every-terminal-back-after-a-restart-v1613-iterm2). |
 | **Recent messages** | Live feed of the last several messages across all agents, with priority and unread badges. |
 
 The page auto-refreshes every 2 seconds. **Kill all servers** in the header drops the entire mesh in one click.
@@ -414,6 +415,8 @@ Set your context windows in `~/.claudelink/context-watcher.json` so occupancy is
 ```
 
 A key matches any model id containing it, and the longest match wins. Models you don't list are measured against 200K, unless a session has already grown past 200K.
+
+**Choosing when ClaudeLink asks.** The box at the top of the Fleet panel sets the occupancy at which ClaudeLink starts asking an idle agent to compact (10 to 95 percent, one value for the whole fleet, *v1.6.12+*). Saving it rewrites `contextOccupancyThreshold` in `~/.claudelink/context-watcher.json`, so there is no file to edit by hand. Set it below the point where your CLI compacts by itself: an automatic compact gives the agent no chance to write a handoff first.
 
 ---
 
@@ -474,6 +477,59 @@ The conversation picks up exactly where it was. Re-register the agent on the mes
 
 ---
 
+## Fleet restore — bring every terminal back after a restart *(v1.6.13+, iTerm2)*
+
+Restarting the computer ends every agent session. Bringing ten terminals back by hand means finding each session id, resuming it in the right pane, and telling each agent who it is. Fleet restore does that in one command.
+
+**How it works.** While the Command Center runs, it writes `~/.claudelink/fleet-snapshot.json` about once a minute: for each agent, its Claude Code session id, its folder, and the iTerm2 pane it sits in. The snapshot keeps the last known entry per role, so a restart does not erase it.
+
+**Before a restart.** Click **Prepare for restart** in the Command Center. Each agent is asked to update its handoff and confirm. Restart when the status line says "Safe to restart".
+
+**After a restart.** Let iTerm2 reopen its windows, then from any shell:
+
+```bash
+claudelink usage --on        # only if you use the Plan Usage meter (see below)
+claudelink restore           # preview: which session goes into which pane. Types nothing.
+claudelink restore --go      # resume them
+```
+
+**With or without the Plan Usage meter** *(v1.6.15+)*. Restore works either way. The preview always shows the exact command it would type.
+
+| Your setup | Resume command typed | What you get |
+|---|---|---|
+| Plan Usage never set up | `claude --resume <id>` | Every session back, same conversation. No quota readings in the Command Center. |
+| Plan Usage set up, proxy running | `claude-metered --resume <id>` | Every session back, and each one feeds the Plan Usage tile. |
+| Plan Usage set up, proxy not running (the usual state right after a reboot) | nothing | Restore stops and tells you. Run `claudelink usage --on` and try again, or add `--plain` to resume without the meter this time. |
+
+The third case stops on purpose: typing plain `claude` there would quietly take every terminal off the meter. A session resumed with `--plain` is not metered until you quit it and resume it with `claude-metered --resume <id>`; nothing else about the session differs. To start metering later, follow the [Plan Usage](#plan-usage-meter--see-your-subscription-quota-v160-opt-in) section (start the proxy, add the `claude-metered` function).
+
+`restore --go` types the resume command into each matched pane, waits for Claude to start, then types "Register yourself as <role>, then read your handoff and resume." and confirms the registration arrived.
+
+**How panes are matched.** In order: the iTerm2 pane id (iTerm2 keeps pane ids across a restart when it restores its windows); the folder, when one agent and one pane share it; pane order, when several agents share a folder in one window. The last case is marked *medium* and is skipped unless you pass `--allow-medium`. An agent with no unambiguous pane is listed as UNMATCHED and nothing is typed for it.
+
+**What it will not do.**
+
+- Type into a pane that is not at a shell prompt. A pane already running something is skipped, which also makes the command safe to run a second time.
+- Guess. Uncertain matches are skipped and reported.
+- Type a value it has not checked. The role name, session id and folder are typed at a shell prompt, so each must match a strict shape or that agent is skipped.
+- Retype blindly. If a keystroke times out, the pane is read first: an empty prompt is retyped, a command left unsubmitted gets Enter only, anything else is left alone.
+
+**Pacing.** Terminals start one at a time, three per batch (`--batch N`), and iTerm2 must be answering before each keystroke. Starting every session at once on a freshly booted machine made iTerm2 drop keystrokes. A fleet of eleven takes a few minutes.
+
+**Flags.**
+
+| Flag | Effect |
+|---|---|
+| `--go` | Act on the preview. Without it nothing is typed. |
+| `--only "Role A,Role B"` | Limit to the named roles. |
+| `--allow-medium` | Include matches made by pane order. |
+| `--batch N` | Terminals started before each pause (default 3). |
+| `--plain` | Resume with plain `claude`, without the Plan Usage meter. |
+
+**Requirements and limits.** iTerm2 only. Claude Code sessions only. The metered resume command needs the `claude-metered` shell function from the [Plan Usage](#plan-usage-meter--see-your-subscription-quota-v160-opt-in) section. iTerm2 must be set to restore its windows at launch.
+
+---
+
 ## Available tools
 
 Once connected, every agent session — Claude Code, Codex CLI, Gemini CLI, Goose, or any other MCP client — gains these MCP tools:
@@ -507,6 +563,9 @@ claudelink install-hooks --uninstall  # remove ClaudeLink hooks
 claudelink usage --on                 # start the Plan Usage quota proxy (opt-in)
 claudelink usage                      # quota proxy status + last capture
 claudelink usage --off                # stop the quota proxy
+claudelink restore                    # preview resuming every agent after a restart
+claudelink restore --go               # resume them (iTerm2; see Fleet restore)
+claudelink prompt-clear [--agent X]   # print a paste-ready "context is high" prompt (prints only, types nothing)
 claudelink reset                      # clear all data (fresh start)
 claudelink help                       # full help
 ```
@@ -535,6 +594,8 @@ The scheduler is **smart**: the SQL filter only nudges terminals with unread mai
 > This permission applies **only** to the autonomous keystroke layer (auto-nudge, auto-compact, the Command Center's Compact/Clear buttons). Plain messaging, `read_inbox`, and the dashboard work on any terminal with no permissions. Running inside **tmux** avoids the iTerm2 grant entirely, though tmux is less tested than iTerm2.
 
 When the keystroke arrives, the receiving CLI treats it as normal user input and the agent calls `read_inbox` via its own tool — fully trusted path. **This works identically for Claude Code, Codex CLI, Gemini CLI, and Goose** because the keystroke is the lowest common denominator every terminal app handles the same.
+
+A terminal that does not answer is not nudged forever *(v1.6.13+)*. After three nudges for the same unread mail the scheduler leaves that terminal alone, and starts again when a newer message arrives for it or the agent finishes a turn. Unread mail also survives a restart: when an agent registers again under the same role, mail sent to its previous registration is delivered to the new one.
 
 Settings persist at `~/.claudelink/scheduler.json`. Audit log at `~/.claudelink/scheduler.log`.
 
