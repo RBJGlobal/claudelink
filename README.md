@@ -565,6 +565,7 @@ claudelink usage                      # quota proxy status + last capture
 claudelink usage --off                # stop the quota proxy
 claudelink restore                    # preview resuming every agent after a restart
 claudelink restore --go               # resume them (iTerm2; see Fleet restore)
+claudelink restore --go --plain       # resume without the Plan Usage meter
 claudelink prompt-clear [--agent X]   # print a paste-ready "context is high" prompt (prints only, types nothing)
 claudelink reset                      # clear all data (fresh start)
 claudelink help                       # full help
