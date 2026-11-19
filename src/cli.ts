@@ -530,6 +530,14 @@ function showHelp() {
                                args shows current status. See the Command
                                Center for the live tile.
     reset                      Clear all messages and agent registrations
+    restore                    Preview which iTerm2 pane each agent would be
+                               resumed in after a restart. Read-only: types
+                               nothing.
+    restore --go [--only "A,B"] [--allow-medium]
+                               Resume each matched agent: types the resume
+                               command into panes that sit at a shell prompt,
+                               then asks each to register. Busy panes and
+                               uncertain matches are skipped.
     prompt-clear [--agent X]   Emit a paste-ready "your context is high" prompt
                                with each live agent's current measured numbers
                                interpolated. Pure stdout — no terminal write.
@@ -1186,6 +1194,75 @@ switch (command) {
   case "reset":
     resetDB();
     break;
+  case "restore": {
+    const flagValue = (name: string): string | null => {
+      const i = args.indexOf(name);
+      return i >= 0 && i + 1 < args.length ? args[i + 1] : null;
+    };
+    const go = args.includes("--go");
+    const only = (flagValue("--only") ?? "").split(",").map((r) => r.trim()).filter(Boolean);
+    import("./fleet-restore.js").then(async (fr) => {
+      const snap = fr.readSnapshot();
+      if (!snap || snap.agents.length === 0) {
+        console.error("  No fleet snapshot yet. The Command Center writes one about every minute.");
+        process.exitCode = 1;
+        return;
+      }
+      const panes = fr.listItermPanes();
+      if (panes === null) {
+        console.error("  Could not read iTerm2 panes (not running, or busy). Try again.");
+        process.exitCode = 1;
+        return;
+      }
+      // Test aid: match as if iTerm2 had handed out new pane ids (as it may
+      // after a restart), so the folder rules decide.
+      const agents = args.includes("--ignore-pane-ids")
+        ? snap.agents.map((a) => ({ ...a, paneUniqueId: null }))
+        : snap.agents;
+      const matches = fr.matchPanes(agents, panes);
+      console.log(fr.formatPreview(matches, panes, snap));
+      const plan = fr.planRestore(matches, { only, allowMedium: args.includes("--allow-medium") });
+      console.log("");
+      console.log(go ? "Restoring:" : "With --go this would type:");
+      for (const a of plan.actions) console.log(`  ${a.role} -> ${a.tty}\n      ${a.command}\n      ${a.registerText}`);
+      if (plan.actions.length === 0) console.log("  (nothing)");
+      if (plan.skipped.length) {
+        console.log("Skipped:");
+        for (const s of plan.skipped) console.log(`  ${s.role}: ${s.reason}`);
+      }
+      if (!go || plan.actions.length === 0) return;
+      // The resume command runs claude-metered, which needs the usage proxy.
+      // After a reboot the proxy is down and its lock file is stale, so test
+      // the port itself, not the lock's pid (a pid can be reused).
+      const proxyUp = await new Promise<boolean>((resolve) => {
+        let port = 8788;
+        try {
+          const lock = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claudelink", "quota-proxy.lock"), "utf8"));
+          if (Number.isInteger(lock?.port)) port = lock.port;
+        } catch { /* default port */ }
+        const sock = require("net").connect({ host: "127.0.0.1", port });
+        const done = (ok: boolean) => { sock.destroy(); resolve(ok); };
+        sock.setTimeout(1500, () => done(false));
+        sock.once("connect", () => done(true));
+        sock.once("error", () => done(false));
+      });
+      if (!proxyUp) {
+        console.error("\n  The usage proxy is not running, so nothing was typed.");
+        console.error("  Start it with:  claudelink usage --on   then run this command again.");
+        process.exitCode = 1;
+        return;
+      }
+      console.log("");
+      const res = await fr.runRestore(plan, (l) => console.log("  " + l));
+      console.log("");
+      console.log(`Done. Registered: ${res.registered.length}. Not confirmed: ${res.notConfirmed.length}${res.notConfirmed.length ? " (" + res.notConfirmed.join(", ") + ")" : ""}.`);
+      if (res.notConfirmed.length) process.exitCode = 1;
+    }).catch((e: any) => {
+      console.error(`  restore failed: ${e?.message ?? String(e)}`);
+      process.exitCode = 1;
+    });
+    break;
+  }
   case "prompt-clear": {
     const agentIdx = args.indexOf("--agent");
     const role =

@@ -6,6 +6,8 @@ import { execFileSync } from "child_process";
 import Database from "better-sqlite3";
 import { startScheduler, SchedulerHandle } from "./scheduler.js";
 import { startRebuildJob, RebuildHandle } from "./rebuild-job.js";
+import { startFleetSnapshot, FleetSnapshotHandle } from "./fleet-restore.js";
+import { askAllToPrepare, currentPrepStatus, PrepStatus } from "./restart-prep.js";
 import {
   startRecoveryWatcher,
   RecoveryWatcherHandle,
@@ -282,6 +284,7 @@ async function getState(): Promise<{
   health: Health;
   recent_messages: any[];
   compactWatcher: { enabled: boolean; mode: string; scope: string; threshold: number };
+  restartPrep: PrepStatus | null;
 }> {
   const servers = listClaudelinkServers();
   const db = new Database(DB_PATH(), { readonly: false });
@@ -365,6 +368,8 @@ async function getState(): Promise<{
     )
     .all();
 
+  let restartPrep: PrepStatus | null = null;
+  try { restartPrep = currentPrepStatus(db); } catch { /* never breaks the state call */ }
   db.close();
 
   // Stage 1 — enrich each ALIVE agent with live fleet metrics (context %, $,
@@ -395,6 +400,7 @@ async function getState(): Promise<{
     servers,
     agents: enriched,
     compactWatcher: { enabled: cw.enabled, mode: cw.mode, scope: cw.injectScope, threshold: cw.contextOccupancyThreshold },
+    restartPrep,
     health: {
       total_agents: enriched.length,
       total_messages: totalMessages,
@@ -795,6 +801,8 @@ const HTML = String.raw`<!doctype html>
   <h1>ClaudeLink Command Center</h1>
   <span class="mono" id="last-update">—</span>
   <span class="spacer"></span>
+  <span class="mono" id="restart-prep"></span>
+  <button id="btn-prep-restart" title="Ask every terminal to update its handoff before you restart the computer">Prepare for restart</button>
   <button id="btn-refresh">Refresh</button>
   <button id="btn-kill-all" class="danger">Kill all servers</button>
   <button id="btn-quit" class="danger">Quit UI</button>
@@ -1080,6 +1088,20 @@ function fmtAgo(iso) {
 }
 
 function render(state) {
+  // restart prep: who has confirmed their handoff since the last click
+  const rp = state.restartPrep;
+  const rpEl = $("restart-prep");
+  if (!rp) {
+    rpEl.textContent = "";
+  } else {
+    const total = rp.ready.length + rp.waiting.length;
+    let t = "Restart prep: " + rp.ready.length + " of " + total + " ready";
+    if (rp.waiting.length) t += ". Waiting: " + rp.waiting.join(", ");
+    else if (total > 0) t += ". Safe to restart.";
+    if (rp.failed.length) t += ". Not reached: " + rp.failed.join(", ");
+    rpEl.textContent = t;
+    rpEl.style.color = rp.waiting.length || rp.failed.length ? "#e0a84a" : "#5fd08a";
+  }
   // servers
   $("srv-count").textContent = state.servers.length;
   const sb = $("srv-table").querySelector("tbody");
@@ -1422,6 +1444,19 @@ $("btn-refresh").addEventListener("click", async () => {
   btn.textContent = ok ? "Refreshed ✓ " + new Date().toLocaleTimeString() : "Refresh failed";
   btn.disabled = false;
   refreshBtnTimer = setTimeout(() => { btn.textContent = "Refresh"; }, 3000);
+});
+$("btn-prep-restart").addEventListener("click", async () => {
+  if (!confirm("Ask every terminal to update its handoff and get ready for a restart? This types a prompt into each agent's terminal.")) return;
+  const btn = $("btn-prep-restart");
+  btn.disabled = true;
+  btn.textContent = "Asking…";
+  try {
+    const r = await api("/api/prepare-restart", "POST");
+    toast("Asked " + r.waiting.length + " terminal(s)" + (r.failed.length ? ", " + r.failed.length + " not reached" : ""));
+    refresh();
+  } catch (err) { toast(err.message, "error"); }
+  btn.disabled = false;
+  btn.textContent = "Prepare for restart";
 });
 $("btn-kill-all").addEventListener("click", async () => {
   if (!confirm("Kill ALL claudelink-server processes? This will disrupt every Claude Code session using ClaudeLink.")) return;
@@ -1925,6 +1960,7 @@ export function startUIServer(port = 7878): http.Server {
   let recoveryWatcherHandle: RecoveryWatcherHandle | null = null;
   let contextWatcherHandle: ContextWatcherHandle | null = null;
   let rebuildJobHandle: RebuildHandle | null = null;
+  let fleetSnapshotHandle: FleetSnapshotHandle | null = null;
   const server = http.createServer(async (req, res) => {
     const send = (status: number, body: any, contentType = "application/json") => {
       res.statusCode = status;
@@ -1954,6 +1990,16 @@ export function startUIServer(port = 7878): http.Server {
       }
       if (req.method === "POST" && p === "/api/kill-all") {
         return send(200, killAllServers());
+      }
+      if (req.method === "POST" && p === "/api/prepare-restart") {
+        // Types the "prepare for restart" prompt into every live agent's
+        // terminal. Readiness is then reported in /api/state.restartPrep.
+        const db = new Database(DB_PATH(), { readonly: true });
+        try {
+          return send(200, askAllToPrepare(db));
+        } finally {
+          db.close();
+        }
       }
       if (req.method === "POST" && p.startsWith("/api/kill/")) {
         const pid = parseInt(p.slice("/api/kill/".length), 10);
@@ -2290,6 +2336,7 @@ export function startUIServer(port = 7878): http.Server {
     recoveryWatcherHandle = startRecoveryWatcher();
     contextWatcherHandle = startContextWatcher();
     rebuildJobHandle = startRebuildJob();
+    fleetSnapshotHandle = startFleetSnapshot();
   }
 
   const writeLock = () => {
@@ -2316,6 +2363,7 @@ export function startUIServer(port = 7878): http.Server {
     if (recoveryWatcherHandle) recoveryWatcherHandle.stop();
     if (contextWatcherHandle) contextWatcherHandle.stop();
     if (rebuildJobHandle) rebuildJobHandle.stop();
+    if (fleetSnapshotHandle) fleetSnapshotHandle.stop();
     cleanup();
   };
   process.on("SIGTERM", () => { stopAll(); process.exit(0); });

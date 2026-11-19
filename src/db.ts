@@ -290,7 +290,20 @@ export class NexusDB {
     pid: number,
     opts: RegisterOptions
   ): string {
-    this.pruneDeadAgents();
+    // Dead rows that held this role are this agent's predecessors (the same
+    // seat before a restart or a resume). Note them before the prune so their
+    // unread mail can be handed to the new id below; without this, mail sent
+    // to the old id is never delivered, because read_inbox matches on id.
+    const predecessors = (
+      this.db.prepare(`SELECT id, pid FROM agents WHERE role = ?`).all(role) as {
+        id: string;
+        pid: number;
+      }[]
+    )
+      .filter((a) => a.pid !== pid && !isProcessAlive(a.pid))
+      .map((a) => a.id);
+
+    this.pruneDeadAgents(predecessors);
 
     // Enforce one-live-agent-per-TTY. If a tty is provided and another row
     // already holds it, the holder is either:
@@ -335,12 +348,16 @@ export class NexusDB {
               `Deregister that agent first or open a new terminal.`
           );
         }
-        const cleanupStale = this.db.transaction(() => {
-          this.db.prepare(`DELETE FROM messages WHERE from_agent = ?`).run(existing.id);
-          this.db.prepare(`DELETE FROM bulletin WHERE from_agent = ?`).run(existing.id);
-          this.db.prepare(`DELETE FROM agents WHERE id = ?`).run(existing.id);
-        });
-        cleanupStale();
+        // A predecessor on this tty is removed further down, after its
+        // unread mail has moved to the new id.
+        if (!predecessors.includes(existing.id)) {
+          const cleanupStale = this.db.transaction(() => {
+            this.db.prepare(`DELETE FROM messages WHERE from_agent = ?`).run(existing.id);
+            this.db.prepare(`DELETE FROM bulletin WHERE from_agent = ?`).run(existing.id);
+            this.db.prepare(`DELETE FROM agents WHERE id = ?`).run(existing.id);
+          });
+          cleanupStale();
+        }
       }
     }
 
@@ -361,6 +378,24 @@ export class NexusDB {
         opts.paneId,
         opts.autonomousReply ? 1 : 0
       );
+
+    if (predecessors.length > 0) {
+      const ph = predecessors.map(() => "?").join(",");
+      const inherit = this.db.transaction(() => {
+        // Unread mail addressed to the old id, and unread mail the old id
+        // sent that its recipients have not seen yet, both carry over.
+        this.db
+          .prepare(`UPDATE messages SET to_agent = ? WHERE read = 0 AND to_agent IN (${ph})`)
+          .run(id, ...predecessors);
+        this.db
+          .prepare(`UPDATE messages SET from_agent = ? WHERE read = 0 AND from_agent IN (${ph})`)
+          .run(id, ...predecessors);
+        this.db.prepare(`DELETE FROM messages WHERE from_agent IN (${ph})`).run(...predecessors);
+        this.db.prepare(`DELETE FROM bulletin WHERE from_agent IN (${ph})`).run(...predecessors);
+        this.db.prepare(`DELETE FROM agents WHERE id IN (${ph})`).run(...predecessors);
+      });
+      inherit();
+    }
 
     return id;
   }
@@ -635,14 +670,24 @@ export class NexusDB {
     return r.changes > 0;
   }
 
-  pruneDeadAgents(): void {
+  // `keep`: dead ids the caller will deal with itself (registerAgent's
+  // predecessors). A dead agent with unread mail waiting is also kept, so the
+  // mail is still there when the same role registers again: after a restart
+  // every agent is dead at once, and the first one to register would
+  // otherwise strand the unread inbox of all the others. Such rows go when a
+  // successor registers, or with "Heal orphans" in the Command Center.
+  pruneDeadAgents(keep: string[] = []): void {
     const agents = this.db
       .prepare(`SELECT id, pid FROM agents`)
       .all() as { id: string; pid: number }[];
 
+    const hasUnread = this.db.prepare(
+      `SELECT 1 FROM messages WHERE to_agent = ? AND read = 0 LIMIT 1`
+    );
     const deadIds = agents
       .filter((a) => !isProcessAlive(a.pid))
-      .map((a) => a.id);
+      .map((a) => a.id)
+      .filter((id) => !keep.includes(id) && hasUnread.get(id) === undefined);
 
     if (deadIds.length === 0) return;
 

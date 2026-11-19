@@ -187,6 +187,72 @@ export function hasUnreadMail(db: Database.Database, agentId: string): boolean {
   return row !== undefined;
 }
 
+// --- Unanswered-nudge backoff -------------------------------------------
+//
+// A nudge that lands but is never submitted (iTerm2 delivering queued
+// keystrokes in a burst that the CLI reads as a paste) leaves the inbox
+// unread, so the next tick nudges again, forever: 531 attempts into one
+// terminal overnight. After MAX_UNANSWERED_NUDGES attempts for the same
+// unread mail, stop. Start again only when something changes: a newer
+// message arrives, or the terminal shows activity (its Stop hook fired)
+// after the last attempt.
+
+export const MAX_UNANSWERED_NUDGES = 3;
+
+export interface NudgeState {
+  newestUnreadId: number; // newest unread message id the attempts were for
+  attempts: number; // attempts that may have typed into the terminal
+  lastAttemptAt: number; // ms epoch of the last such attempt
+  backoffLogged: boolean; // the "backoff" log line is written once
+}
+
+// Pure decision. `lastActiveTs` is agents.last_seen_active_ts (ms) or null.
+export function nudgeDecision(
+  prev: NudgeState | undefined,
+  newestUnreadId: number,
+  lastActiveTs: number | null
+): { nudge: boolean; state: NudgeState } {
+  const fresh: NudgeState = {
+    newestUnreadId,
+    attempts: 0,
+    lastAttemptAt: 0,
+    backoffLogged: false,
+  };
+  if (!prev) return { nudge: true, state: fresh };
+  if (newestUnreadId > prev.newestUnreadId) return { nudge: true, state: fresh };
+  if (lastActiveTs !== null && prev.attempts > 0 && lastActiveTs > prev.lastAttemptAt) {
+    return { nudge: true, state: fresh };
+  }
+  return { nudge: prev.attempts < MAX_UNANSWERED_NUDGES, state: prev };
+}
+
+// Newest unread message id and last activity stamp for one agent. Mirrors the
+// unread filter in selectCandidates. Returns null when nothing is unread.
+export function unreadSnapshot(
+  db: Database.Database,
+  agentId: string
+): { newestUnreadId: number; lastActiveTs: number | null } | null {
+  const m = db
+    .prepare(
+      `SELECT MAX(m.id) AS newest FROM messages m
+       WHERE m.read = 0
+         AND m.from_agent != ?
+         AND (m.to_agent = ? OR m.to_agent IS NULL)`
+    )
+    .get(agentId, agentId) as { newest: number | null } | undefined;
+  if (!m || m.newest === null || m.newest === undefined) return null;
+  let lastActiveTs: number | null = null;
+  try {
+    const a = db
+      .prepare(`SELECT last_seen_active_ts AS ts FROM agents WHERE id = ?`)
+      .get(agentId) as { ts: number | null } | undefined;
+    lastActiveTs = a?.ts ?? null;
+  } catch {
+    // column missing on a pre-v2 database: no activity signal
+  }
+  return { newestUnreadId: m.newest, lastActiveTs };
+}
+
 export interface SchedulerHandle {
   reschedule: () => void;
   stop: () => void;
@@ -197,6 +263,9 @@ export function startScheduler(): SchedulerHandle {
   let db: Database.Database | null = null;
   let timer: NodeJS.Timeout | null = null;
   let currentInterval = 0; // minutes
+  // In-memory only: a Command Center restart forgets it, which allows at
+  // most MAX_UNANSWERED_NUDGES more attempts per terminal.
+  const nudgeStates = new Map<string, NudgeState>();
 
   const openDb = (): Database.Database => {
     if (!db) db = new Database(DB_PATH, { readonly: true });
@@ -212,7 +281,10 @@ export function startScheduler(): SchedulerHandle {
       logLine(`tick-error: ${e?.message ?? String(e)}`);
       return summary;
     }
-    if (candidates.length === 0) return summary;
+    if (candidates.length === 0) {
+      nudgeStates.clear();
+      return summary;
+    }
 
     for (const c of candidates) {
       // Just-in-time recheck. selectCandidates snapshots the candidate set
@@ -243,7 +315,43 @@ export function startScheduler(): SchedulerHandle {
         continue;
       }
 
+      // Backoff: stop after a few attempts for the same unread mail.
+      let state: NudgeState | undefined;
+      try {
+        const snap = unreadSnapshot(openDb(), c.id);
+        if (snap) {
+          const d = nudgeDecision(
+            nudgeStates.get(c.id),
+            snap.newestUnreadId,
+            snap.lastActiveTs
+          );
+          state = d.state;
+          nudgeStates.set(c.id, state);
+          if (!d.nudge) {
+            summary.skipped++;
+            if (!state.backoffLogged) {
+              state.backoffLogged = true;
+              logLine(
+                `backoff role=${c.role} tty=${c.tty} attempts=${state.attempts} reason="unanswered; waiting for a new message or terminal activity"`
+              );
+            }
+            continue;
+          }
+        }
+      } catch (e: any) {
+        // Fail-open, same posture as the recheck above.
+        logLine(
+          `backoff-error role=${c.role} tty=${c.tty} error="${e?.message ?? String(e)}"`
+        );
+      }
+
       const result = injectKeystroke(c, NUDGE_TEXT);
+      // "ok" and "unknown" may both have typed into the terminal, so both
+      // count toward the limit. "fail" and "skip" typed nothing.
+      if (state && (result === "ok" || result === "unknown")) {
+        state.attempts++;
+        state.lastAttemptAt = Date.now();
+      }
       if (result === "ok") {
         summary.fired++;
         logLine(
@@ -254,6 +362,12 @@ export function startScheduler(): SchedulerHandle {
       } else {
         summary.failed++;
       }
+    }
+
+    // Forget agents that are no longer candidates (inbox read, or gone).
+    const live = new Set(candidates.map((c) => c.id));
+    for (const id of nudgeStates.keys()) {
+      if (!live.has(id)) nudgeStates.delete(id);
     }
 
     // Tick summary makes the broadcast race observable. A healthy directed-
