@@ -7,6 +7,7 @@
 
 import Database from "better-sqlite3";
 import { injectKeystroke, NudgeCandidate } from "./scheduler.js";
+import { waitForIterm, paneContents } from "./iterm.js";
 
 export const RESTART_PREP_TEXT =
   "The operator is about to restart this computer. Finish or park any step in flight, " +
@@ -44,24 +45,62 @@ export function prepStatus(req: PrepRequest, stamps: Map<string, number | null>)
   return { at: req.at, ready, waiting, failed: req.failed };
 }
 
-export function askAllToPrepare(db: Database.Database): PrepStatus {
-  const rows = db
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// A phrase from the prompt, used to see whether it reached a pane.
+const MARKER = "about to restart this computer";
+
+// Types the prompt into one terminal. On an iTerm2 timeout the pane is read:
+// the prompt is typed again only when it is not on the screen. Returns true
+// when the prompt reached the terminal (or the terminal app gives no way to
+// check and accepted the keystroke).
+async function askOne(c: NudgeCandidate): Promise<boolean> {
+  const isIterm = (c.terminal_app || "").toLowerCase() === "iterm2";
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    if (isIterm) await waitForIterm(30000);
+    const r = injectKeystroke(c, RESTART_PREP_TEXT);
+    if (r === "ok") return true;
+    if (r !== "unknown") return false;
+    await sleep(4000);
+    await waitForIterm(30000);
+    const seen = paneContents(c.tty);
+    if (seen !== null && seen.replace(/\s+/g, " ").includes(MARKER)) return true;
+    if (seen === null) return false; // cannot tell; do not type twice
+  }
+  return false;
+}
+
+async function askMany(rows: NudgeCandidate[], req: PrepRequest): Promise<void> {
+  for (const c of rows) {
+    if (!isAlive(c.pid)) continue;
+    if (await askOne(c)) req.asked.push({ id: c.id, role: c.role });
+    else req.failed.push(c.role);
+  }
+}
+
+const liveRows = (db: Database.Database) =>
+  db
     .prepare(
       `SELECT id, role, tty, terminal_app, pane_id, pid FROM agents
        WHERE tty IS NOT NULL AND tty != ''`
     )
     .all() as NudgeCandidate[];
+
+export async function askAllToPrepare(db: Database.Database): Promise<PrepStatus> {
   const req: PrepRequest = { at: Date.now(), asked: [], failed: [] };
-  for (const c of rows) {
-    if (!isAlive(c.pid)) continue;
-    const r = injectKeystroke(c, RESTART_PREP_TEXT);
-    // "unknown" = iTerm2 timed out after taking the text; it may have landed,
-    // so wait for that agent rather than typing twice.
-    if (r === "ok" || r === "unknown") req.asked.push({ id: c.id, role: c.role });
-    else req.failed.push(c.role);
-  }
+  await askMany(liveRows(db), req);
   current = req;
   return prepStatus(req, new Map());
+}
+
+// Asks again only the terminals the last request could not reach. The click
+// time is kept, so agents that already confirmed stay ready.
+export async function retryNotReached(db: Database.Database): Promise<PrepStatus | null> {
+  if (!current) return null;
+  const want = new Set(current.failed);
+  current.failed = [];
+  await askMany(liveRows(db).filter((c) => want.has(c.role)), current);
+  return currentPrepStatus(db);
 }
 
 export function currentPrepStatus(db: Database.Database): PrepStatus | null {

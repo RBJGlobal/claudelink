@@ -141,3 +141,27 @@ test("planRestore --only limits to the named roles, case-insensitive, and report
   assert.deepEqual(p.actions.map((a) => a.role), ["Dev Two"]);
   assert.deepEqual(p.skipped, [{ role: "nobody", reason: "no such role in the snapshot" }]);
 });
+
+// ---- resumeCheck: was a timed-out resume command delivered? ----------------
+
+import { resumeCheck } from "../src/fleet-restore.js";
+
+test("resumeCheck: a pane Claude owns counts as started, whatever it shows", () => {
+  assert.equal(resumeCheck(false, null, SID), "started");
+  assert.equal(resumeCheck(false, "user@host proj % ", SID), "started");
+});
+
+test("resumeCheck: an empty shell prompt means the text never arrived", () => {
+  assert.equal(resumeCheck(true, "Last login: Wed\nuser@host proj % \n\n", SID), "retype");
+});
+
+test("resumeCheck: the command sitting unsubmitted on the prompt needs only Enter", () => {
+  const c = `user@host proj % cd '/x' && claude-metered --resume ${SID}\n`;
+  assert.equal(resumeCheck(true, c, SID), "enter");
+});
+
+test("resumeCheck: anything else is left alone, never typed over", () => {
+  assert.equal(resumeCheck(true, null, SID), "leave"); // pane unreadable
+  assert.equal(resumeCheck(true, "user@host proj % cd '/x' && claude-meter", SID), "leave"); // partly typed
+  assert.equal(resumeCheck(true, "claude-metered: usage proxy not running. Start it", SID), "leave");
+});

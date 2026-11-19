@@ -533,11 +533,13 @@ function showHelp() {
     restore                    Preview which iTerm2 pane each agent would be
                                resumed in after a restart. Read-only: types
                                nothing.
-    restore --go [--only "A,B"] [--allow-medium]
+    restore --go [--only "A,B"] [--allow-medium] [--batch N]
                                Resume each matched agent: types the resume
                                command into panes that sit at a shell prompt,
                                then asks each to register. Busy panes and
-                               uncertain matches are skipped.
+                               uncertain matches are skipped. Starts N
+                               terminals at a time (default 3). Safe to run
+                               again: resumed panes are skipped.
     prompt-clear [--agent X]   Emit a paste-ready "your context is high" prompt
                                with each live agent's current measured numbers
                                interpolated. Pure stdout — no terminal write.
@@ -1253,7 +1255,10 @@ switch (command) {
         return;
       }
       console.log("");
-      const res = await fr.runRestore(plan, (l) => console.log("  " + l));
+      const batch = Number(flagValue("--batch"));
+      const res = await fr.runRestore(plan, (l) => console.log("  " + l), {
+        batchSize: Number.isInteger(batch) && batch > 0 ? batch : undefined,
+      });
       console.log("");
       console.log(`Done. Registered: ${res.registered.length}. Not confirmed: ${res.notConfirmed.length}${res.notConfirmed.length ? " (" + res.notConfirmed.join(", ") + ")" : ""}.`);
       if (res.notConfirmed.length) process.exitCode = 1;

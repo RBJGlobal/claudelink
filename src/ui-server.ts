@@ -7,7 +7,7 @@ import Database from "better-sqlite3";
 import { startScheduler, SchedulerHandle } from "./scheduler.js";
 import { startRebuildJob, RebuildHandle } from "./rebuild-job.js";
 import { startFleetSnapshot, FleetSnapshotHandle } from "./fleet-restore.js";
-import { askAllToPrepare, currentPrepStatus, PrepStatus } from "./restart-prep.js";
+import { askAllToPrepare, retryNotReached, currentPrepStatus, PrepStatus } from "./restart-prep.js";
 import {
   startRecoveryWatcher,
   RecoveryWatcherHandle,
@@ -802,6 +802,7 @@ const HTML = String.raw`<!doctype html>
   <span class="mono" id="last-update">—</span>
   <span class="spacer"></span>
   <span class="mono" id="restart-prep"></span>
+  <button id="btn-prep-retry" style="display:none" title="Type the restart prompt again, only into the terminals it did not reach">Retry not reached</button>
   <button id="btn-prep-restart" title="Ask every terminal to update its handoff before you restart the computer">Prepare for restart</button>
   <button id="btn-refresh">Refresh</button>
   <button id="btn-kill-all" class="danger">Kill all servers</button>
@@ -1091,6 +1092,7 @@ function render(state) {
   // restart prep: who has confirmed their handoff since the last click
   const rp = state.restartPrep;
   const rpEl = $("restart-prep");
+  $("btn-prep-retry").style.display = rp && rp.failed.length ? "" : "none";
   if (!rp) {
     rpEl.textContent = "";
   } else {
@@ -1457,6 +1459,18 @@ $("btn-prep-restart").addEventListener("click", async () => {
   } catch (err) { toast(err.message, "error"); }
   btn.disabled = false;
   btn.textContent = "Prepare for restart";
+});
+$("btn-prep-retry").addEventListener("click", async () => {
+  const btn = $("btn-prep-retry");
+  btn.disabled = true;
+  btn.textContent = "Retrying…";
+  try {
+    const r = await api("/api/prepare-restart/retry", "POST");
+    toast(r.failed.length ? r.failed.length + " still not reached" : "All terminals reached");
+    refresh();
+  } catch (err) { toast(err.message, "error"); }
+  btn.disabled = false;
+  btn.textContent = "Retry not reached";
 });
 $("btn-kill-all").addEventListener("click", async () => {
   if (!confirm("Kill ALL claudelink-server processes? This will disrupt every Claude Code session using ClaudeLink.")) return;
@@ -1996,7 +2010,17 @@ export function startUIServer(port = 7878): http.Server {
         // terminal. Readiness is then reported in /api/state.restartPrep.
         const db = new Database(DB_PATH(), { readonly: true });
         try {
-          return send(200, askAllToPrepare(db));
+          return send(200, await askAllToPrepare(db));
+        } finally {
+          db.close();
+        }
+      }
+      if (req.method === "POST" && p === "/api/prepare-restart/retry") {
+        // Re-asks only the terminals the last click could not reach.
+        const db = new Database(DB_PATH(), { readonly: true });
+        try {
+          const r = await retryNotReached(db);
+          return send(r ? 200 : 404, r ?? { ok: false });
         } finally {
           db.close();
         }

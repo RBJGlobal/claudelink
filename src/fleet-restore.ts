@@ -13,6 +13,7 @@ import { execFileSync } from "child_process";
 import Database from "better-sqlite3";
 import { cwdForPid } from "./usage-reader.js";
 import { injectKeystroke } from "./scheduler.js";
+import { waitForIterm, paneContents, pressEnter, lastLine } from "./iterm.js";
 
 const DIR = path.join(os.homedir(), ".claudelink");
 export const SNAPSHOT_PATH = path.join(DIR, "fleet-snapshot.json");
@@ -373,51 +374,121 @@ function registeredOnTty(role: string, tty: string): boolean {
   }
 }
 
+// What to do about a resume command whose delivery is in doubt. Pure.
+//   started: something other than the shell owns the pane; the command ran.
+//   enter:   the command sits on the prompt line unsubmitted; press Enter.
+//   retype:  the pane is at an empty shell prompt; the text never arrived.
+//   leave:   the pane could not be read, or shows something unexpected.
+export function resumeCheck(
+  idle: boolean,
+  contents: string | null,
+  sessionId: string
+): "started" | "enter" | "retype" | "leave" {
+  if (!idle) return "started";
+  if (contents === null) return "leave";
+  const last = lastLine(contents);
+  if (last.includes(sessionId)) return "enter";
+  // Retype only at an empty prompt: the last line ends with a prompt
+  // character and nothing after it. Text after the prompt (a partly typed
+  // command, an error message) is never typed over.
+  return /[%$#>\u276f]\s*$/.test(last) ? "retype" : "leave";
+}
+
+export interface RunOptions {
+  settleSec?: number; // wait after Claude starts before the register line
+  verifySec?: number; // how long to wait for registrations
+  batchSize?: number; // terminals started before pausing for iTerm2
+}
+
+interface Started extends RestoreAction { startedAt: number; sessionId: string }
+
 // Types the resume command into each planned pane, waits for Claude to start,
-// then types the register line. Never retries a keystroke: a timed-out write
-// may still land. `log` receives one line per event.
+// then types the register line. Paced: iTerm2 must be answering before each
+// keystroke, and terminals start a few at a time, because starting every
+// session at once after a reboot made iTerm2 drop keystrokes. A keystroke is
+// typed again only after the pane was read and seen to be without it.
 export async function runRestore(
   plan: RestorePlan,
   log: (line: string) => void,
-  settleSec = 20,
-  verifySec = 180
+  opts: RunOptions = {}
 ): Promise<{ registered: string[]; notConfirmed: string[] }> {
-  const started: RestoreAction[] = [];
-  for (const a of plan.actions) {
+  const settleSec = opts.settleSec ?? 20;
+  const verifySec = opts.verifySec ?? 180;
+  const batchSize = Math.max(1, opts.batchSize ?? 3);
+  const sidOf = (a: RestoreAction) => a.command.slice(a.command.lastIndexOf(" ") + 1);
+
+  const running: Started[] = [];
+  const attempted: string[] = [];
+
+  // Waits up to `sec` for Claude to own the pane.
+  const waitStart = async (tty: string, sec: number): Promise<boolean> => {
+    const end = Date.now() + sec * 1000;
+    while (Date.now() < end) {
+      if (!paneShell(tty).idle) return true;
+      await sleep(1500);
+    }
+    return !paneShell(tty).idle;
+  };
+
+  for (let i = 0; i < plan.actions.length; i++) {
+    const a = plan.actions[i];
+    const sid = sidOf(a);
+    if (i > 0 && i % batchSize === 0) {
+      log(`pace  ${i} of ${plan.actions.length} started; letting iTerm2 catch up`);
+      await sleep(5000);
+    }
+    if (!(await waitForIterm())) {
+      log(`fail  ${a.role}: iTerm2 is not responding; nothing typed into ${a.tty}`);
+      continue;
+    }
     // Re-check right before typing: the operator may have started something.
     if (!paneShell(a.tty).idle) { log(`skip  ${a.role}: pane became busy`); continue; }
-    const r = type(a.tty, a.role, a.command);
-    if (r === "fail" || r === "skip") { log(`fail  ${a.role}: could not type into ${a.tty}`); continue; }
-    log(`typed ${a.role}: resume command into ${a.tty}${r === "unknown" ? " (iTerm2 slow, delivery unconfirmed)" : ""}`);
-    started.push(a);
+    attempted.push(a.role);
+
+    let started = false;
+    for (let attempt = 1; attempt <= 3 && !started; attempt++) {
+      const r = type(a.tty, a.role, a.command);
+      if (r === "fail" || r === "skip") { log(`fail  ${a.role}: could not type into ${a.tty}`); break; }
+      log(`typed ${a.role}: resume command into ${a.tty}${attempt > 1 ? ` (attempt ${attempt})` : ""}${r === "unknown" ? " (iTerm2 slow, checking the pane)" : ""}`);
+      if (await waitStart(a.tty, r === "ok" ? 20 : 30)) { started = true; break; }
+      // Not started. Look at the pane before doing anything else.
+      await waitForIterm();
+      const verdict = resumeCheck(paneShell(a.tty).idle, paneContents(a.tty), sid);
+      if (verdict === "started") { started = true; break; }
+      if (verdict === "enter") {
+        log(`fix   ${a.role}: command was typed but not submitted; pressing Enter`);
+        pressEnter(a.tty);
+        if (await waitStart(a.tty, 20)) started = true;
+        break;
+      }
+      if (verdict === "leave") {
+        log(`check ${a.role}: ${a.tty} shows something unexpected; left alone`);
+        break;
+      }
+      log(`retry ${a.role}: ${a.tty} is still at an empty prompt`);
+    }
+    if (started) running.push({ ...a, startedAt: Date.now(), sessionId: sid });
+    else log(`fail  ${a.role}: Claude did not start in ${a.tty}; no register line typed there`);
   }
 
-  // Wait for Claude to take over each pane (the shell is no longer in front).
-  const running: RestoreAction[] = [];
-  const deadline = Date.now() + 60000;
-  let waiting = [...started];
-  while (waiting.length && Date.now() < deadline) {
-    await sleep(2000);
-    waiting = waiting.filter((a) => {
-      if (paneShell(a.tty).idle) return true;
-      running.push(a);
-      return false;
-    });
-  }
-  for (const a of waiting) log(`fail  ${a.role}: Claude did not start in ${a.tty}; nothing more typed there`);
-  if (!running.length) return { registered: [], notConfirmed: started.map((a) => a.role) };
+  if (!running.length) return { registered: [], notConfirmed: attempted };
 
-  log(`wait  ${settleSec}s for Claude to finish loading`);
-  await sleep(settleSec * 1000);
-  const asked: RestoreAction[] = [];
+  // Register lines, each once its own session has had time to load.
+  const asked: (Started & { askedAt: number; retried: boolean })[] = [];
   for (const a of running) {
-    // Only type the register line while Claude still owns the pane; if it
-    // exited, the text would land at the shell prompt.
+    const wait = a.startedAt + settleSec * 1000 - Date.now();
+    if (wait > 0) {
+      log(`wait  ${Math.ceil(wait / 1000)}s for ${a.role} to finish loading`);
+      await sleep(wait);
+    }
+    await waitForIterm();
+    // Only type while Claude still owns the pane; if it exited, the text
+    // would land at the shell prompt.
     if (paneShell(a.tty).idle) { log(`fail  ${a.role}: Claude exited in ${a.tty}; register line not typed`); continue; }
     const r = type(a.tty, a.role, a.registerText);
     if (r === "fail" || r === "skip") { log(`fail  ${a.role}: could not type the register line`); continue; }
-    log(`typed ${a.role}: register line`);
-    asked.push(a);
+    log(`typed ${a.role}: register line${r === "unknown" ? " (iTerm2 slow, delivery unconfirmed)" : ""}`);
+    asked.push({ ...a, askedAt: Date.now(), retried: false });
   }
 
   const registered: string[] = [];
@@ -425,14 +496,28 @@ export async function runRestore(
   const vDeadline = Date.now() + verifySec * 1000;
   while (pending.length && Date.now() < vDeadline) {
     await sleep(3000);
-    pending = pending.filter((a) => {
+    const next: typeof pending = [];
+    for (const a of pending) {
       let ok = false;
       try { ok = registeredOnTty(a.role, a.tty); } catch { /* retry next round */ }
-      if (ok) { registered.push(a.role); log(`ok    ${a.role}: registered on ${a.tty}`); }
-      return !ok;
-    });
+      if (ok) { registered.push(a.role); log(`ok    ${a.role}: registered on ${a.tty}`); continue; }
+      // One retype, only if a minute has passed, Claude still owns the pane
+      // and the register line is nowhere on its screen. A second copy is
+      // harmless: registering twice keeps the same agent.
+      if (!a.retried && Date.now() - a.askedAt > 60000 && !paneShell(a.tty).idle) {
+        const c = paneContents(a.tty);
+        if (c !== null && !c.includes(`Register yourself as ${a.role}`)) {
+          a.retried = true;
+          a.askedAt = Date.now();
+          log(`retry ${a.role}: register line is not on screen; typing it again`);
+          type(a.tty, a.role, a.registerText);
+        }
+      }
+      next.push(a);
+    }
+    pending = next;
   }
   for (const a of pending) log(`check ${a.role}: not registered after ${verifySec}s, look at ${a.tty}`);
   const done = new Set(registered);
-  return { registered, notConfirmed: started.map((a) => a.role).filter((r) => !done.has(r)) };
+  return { registered, notConfirmed: attempted.filter((r) => !done.has(r)) };
 }
