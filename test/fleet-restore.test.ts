@@ -102,7 +102,7 @@ test("planRestore builds the resume command and register line for an idle high m
     role: "Dev One",
     tty: "/dev/ttys900",
     command: `cd '/Users/x/My Apps/proj' && claude-metered --resume ${SID}`,
-    registerText: "Register yourself as Dev One, then read your handoff and resume.",
+    registerText: "Register yourself as Dev One, then read your handoff and resume. Re-arm any watches your handoff lists.",
   }]);
 });
 

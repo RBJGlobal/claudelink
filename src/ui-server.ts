@@ -45,6 +45,7 @@ import {
 import { verifyHandoff } from "./compact-executor.js";
 import { buildPromptClearText } from "./prompt-clear.js";
 import { QUOTA_PATH, quotaFreshness, proxyIsRunning } from "./usage-proxy.js";
+import { isAgentAlive } from "./liveness.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DEFAULT_DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -333,7 +334,7 @@ async function getState(): Promise<{
 
   const enriched: AgentRow[] = agents.map((a) => ({
     ...a,
-    alive: isProcessAlive(a.pid),
+    alive: isAgentAlive(a),
   }));
 
   for (const s of servers) {
@@ -433,7 +434,7 @@ async function computeUsage(windowDays: number): Promise<FleetUsage> {
   let rows: { role: string; pid: number; transcript_path: string | null }[];
   try {
     try {
-      rows = db.prepare(`SELECT role, pid, transcript_path FROM agents`).all() as {
+      rows = db.prepare(`SELECT role, pid, last_seen, transcript_path FROM agents`).all() as {
         role: string;
         pid: number;
         transcript_path: string | null;
@@ -442,7 +443,7 @@ async function computeUsage(windowDays: number): Promise<FleetUsage> {
       // Pre-migration DB (live MCP servers still on the old schema, no v3
       // transcript_path column yet). Fall back — per-session breakdown then
       // labels by session-id, and lights up by agent role once deployed.
-      rows = (db.prepare(`SELECT role, pid FROM agents`).all() as { role: string; pid: number }[]).map(
+      rows = (db.prepare(`SELECT role, pid, last_seen FROM agents`).all() as { role: string; pid: number }[]).map(
         (r) => ({ ...r, transcript_path: null })
       );
     }
@@ -450,7 +451,7 @@ async function computeUsage(windowDays: number): Promise<FleetUsage> {
     db.close();
   }
   const live = rows
-    .filter((r) => isProcessAlive(r.pid))
+    .filter((r) => isAgentAlive(r))
     .map((r) => ({ role: r.role, pid: r.pid, transcriptPath: r.transcript_path }));
   // Single transcript pass computes BOTH the meter and the compact-opportunity
   // (the projection's threshold/baseline track the watcher's settings) — no
@@ -489,14 +490,14 @@ async function getOverhead(): Promise<AgentOverhead[]> {
     let rows: { role: string; pid: number; transcript_path: string | null }[];
     try {
       try {
-        rows = db.prepare(`SELECT role, pid, transcript_path FROM agents`).all() as any;
+        rows = db.prepare(`SELECT role, pid, last_seen, transcript_path FROM agents`).all() as any;
       } catch {
-        rows = (db.prepare(`SELECT role, pid FROM agents`).all() as any).map((r: any) => ({ ...r, transcript_path: null }));
+        rows = (db.prepare(`SELECT role, pid, last_seen FROM agents`).all() as any).map((r: any) => ({ ...r, transcript_path: null }));
       }
     } finally {
       db.close();
     }
-    const live = rows.filter((r) => isProcessAlive(r.pid));
+    const live = rows.filter((r) => isAgentAlive(r));
     const out = await Promise.all(
       live.map((r) =>
         readAgentOverhead({
@@ -534,15 +535,15 @@ async function getAgentTimelines(): Promise<AgentTimeline[]> {
     let rows: { role: string; pid: number; transcript_path: string | null }[];
     try {
       try {
-        rows = db.prepare(`SELECT role, pid, transcript_path FROM agents`).all() as any;
+        rows = db.prepare(`SELECT role, pid, last_seen, transcript_path FROM agents`).all() as any;
       } catch {
-        rows = (db.prepare(`SELECT role, pid FROM agents`).all() as any).map((r: any) => ({ ...r, transcript_path: null }));
+        rows = (db.prepare(`SELECT role, pid, last_seen FROM agents`).all() as any).map((r: any) => ({ ...r, transcript_path: null }));
       }
     } finally {
       db.close();
     }
     const live = rows
-      .filter((r) => isProcessAlive(r.pid))
+      .filter((r) => isAgentAlive(r))
       .map((r) => ({ role: r.role, pid: r.pid, transcriptPath: r.transcript_path }));
     return readAgentTimelines(live);
   })()
@@ -560,8 +561,8 @@ async function getAgentTimelines(): Promise<AgentTimeline[]> {
 function healOrphans(): { deleted_messages: number; pruned_agents: number } {
   const db = new Database(DB_PATH());
   const deadAgents = (
-    db.prepare(`SELECT id, pid FROM agents`).all() as { id: string; pid: number }[]
-  ).filter((a) => !isProcessAlive(a.pid));
+    db.prepare(`SELECT id, pid, last_seen FROM agents`).all() as { id: string; pid: number }[]
+  ).filter((a) => !isAgentAlive(a));
 
   if (deadAgents.length === 0) {
     db.close();
@@ -2119,7 +2120,7 @@ export function startUIServer(port = 7878): http.Server {
             db2.pragma("busy_timeout = 5000");
             try {
               const row = db2
-                .prepare(`SELECT id, role, tty, terminal_app, pid FROM agents WHERE id = ? LIMIT 1`)
+                .prepare(`SELECT id, role, tty, terminal_app, pid, last_seen FROM agents WHERE id = ? LIMIT 1`)
                 .get(agentId) as
                 | { id: string; role: string; tty: string | null; terminal_app: string | null; pid: number }
                 | undefined;
@@ -2129,7 +2130,7 @@ export function startUIServer(port = 7878): http.Server {
               if (!row.tty) {
                 return send(400, { error: `agent "${row.role}" registered before v2 (no tty) — restart its session to enable triggers` });
               }
-              if (!isProcessAlive(row.pid)) {
+              if (!isAgentAlive(row)) {
                 return send(400, { error: `agent "${row.role}" process (pid ${row.pid}) is not alive` });
               }
               db2
@@ -2247,11 +2248,11 @@ export function startUIServer(port = 7878): http.Server {
         const db = new Database(DB_PATH(), { readonly: true });
         let rows: { role: string; pid: number }[];
         try {
-          rows = db.prepare(`SELECT role, pid FROM agents`).all() as { role: string; pid: number }[];
+          rows = db.prepare(`SELECT role, pid, last_seen FROM agents`).all() as { role: string; pid: number }[];
         } finally {
           db.close();
         }
-        const live = rows.filter((r) => isProcessAlive(r.pid));
+        const live = rows.filter((r) => isAgentAlive(r));
         // .then(ok, err) split — not .then(ok).catch(err). If `send(200,...)`
         // itself throws (e.g. circular JSON, headers already written), the
         // sibling .catch would also call send → "Cannot set headers after they

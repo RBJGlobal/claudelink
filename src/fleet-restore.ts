@@ -14,6 +14,7 @@ import Database from "better-sqlite3";
 import { cwdForPid } from "./usage-reader.js";
 import { injectKeystroke } from "./scheduler.js";
 import { waitForIterm, paneContents, pressEnter, lastLine } from "./iterm.js";
+import { isAgentAlive } from "./liveness.js";
 
 const DIR = path.join(os.homedir(), ".claudelink");
 export const SNAPSHOT_PATH = path.join(DIR, "fleet-snapshot.json");
@@ -227,7 +228,7 @@ export function captureSnapshot(): number {
   try {
     rows = db
       .prepare(
-        `SELECT role, pid, tty, session_id, transcript_path FROM agents
+        `SELECT role, pid, last_seen, tty, session_id, transcript_path FROM agents
          WHERE session_id IS NOT NULL AND tty IS NOT NULL AND tty != ''`
       )
       .all();
@@ -237,7 +238,7 @@ export function captureSnapshot(): number {
   const now = Date.now();
   const live: SnapshotAgent[] = [];
   for (const r of rows) {
-    if (!isAlive(r.pid)) continue;
+    if (!isAgentAlive(r)) continue;
     const p = panes.find((x) => x.tty === r.tty);
     live.push({
       role: r.role,
@@ -357,7 +358,7 @@ export function planRestore(matches: Match[], opts: RestoreOptions = {}): Restor
       role: a.role,
       tty: m.pane.tty,
       command: `cd '${a.cwd}' && ${opts.plain ? "claude" : "claude-metered"} --resume ${a.sessionId}`,
-      registerText: `Register yourself as ${a.role}, then read your handoff and resume.`,
+      registerText: `Register yourself as ${a.role}, then read your handoff and resume. Re-arm any watches your handoff lists.`,
     });
   }
   if (only.length) {
@@ -380,9 +381,9 @@ function registeredOnTty(role: string, tty: string): boolean {
   const db = new Database(DB_PATH, { readonly: true });
   try {
     const rows = db
-      .prepare(`SELECT pid FROM agents WHERE role = ? AND tty = ?`)
-      .all(role, tty) as { pid: number }[];
-    return rows.some((r) => isAlive(r.pid));
+      .prepare(`SELECT pid, last_seen FROM agents WHERE role = ? AND tty = ?`)
+      .all(role, tty) as { pid: number; last_seen: string | null }[];
+    return rows.some((r) => isAgentAlive(r));
   } finally {
     db.close();
   }

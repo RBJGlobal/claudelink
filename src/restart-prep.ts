@@ -8,11 +8,14 @@
 import Database from "better-sqlite3";
 import { injectKeystroke, NudgeCandidate } from "./scheduler.js";
 import { waitForIterm, paneContents } from "./iterm.js";
+import { isAgentAlive } from "./liveness.js";
 
 export const RESTART_PREP_TEXT =
   "The operator is about to restart this computer. Finish or park any step in flight, " +
-  "bring your handoff file and memory up to date so you can resume without anyone retelling it, " +
-  "then call signal_checkpoint with safe_to_clear=false and the note: ready for restart. " +
+  "bring your handoff file and memory up to date so you can resume without anyone retelling it. " +
+  "Copy anything you still need out of your session scratchpad, because the restart empties it, " +
+  "and list in the handoff any watches or scheduled wake-ups you have armed, because they do not survive. " +
+  "Then call signal_checkpoint with safe_to_clear=false and the note: ready for restart. " +
   "Start no new work after that.";
 
 export interface PrepRequest {
@@ -72,7 +75,7 @@ async function askOne(c: NudgeCandidate): Promise<boolean> {
 
 async function askMany(rows: NudgeCandidate[], req: PrepRequest): Promise<void> {
   for (const c of rows) {
-    if (!isAlive(c.pid)) continue;
+    if (!isAgentAlive(c)) continue;
     if (await askOne(c)) req.asked.push({ id: c.id, role: c.role });
     else req.failed.push(c.role);
   }
@@ -81,7 +84,7 @@ async function askMany(rows: NudgeCandidate[], req: PrepRequest): Promise<void> 
 const liveRows = (db: Database.Database) =>
   db
     .prepare(
-      `SELECT id, role, tty, terminal_app, pane_id, pid FROM agents
+      `SELECT id, role, tty, terminal_app, pane_id, pid, last_seen FROM agents
        WHERE tty IS NOT NULL AND tty != ''`
     )
     .all() as NudgeCandidate[];

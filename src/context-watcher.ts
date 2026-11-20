@@ -46,6 +46,7 @@ import { injectKeystroke, NudgeCandidate } from "./scheduler.js";
 import { verifyHandoff } from "./compact-executor.js";
 import { decideCompactAction } from "./compact-decision.js";
 import { decideManualAction } from "./manual-decision.js";
+import { isAgentAlive } from "./liveness.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -737,11 +738,11 @@ export function startContextWatcher(): ContextWatcherHandle {
       .prepare(
         `SELECT id, role, pid, tty, terminal_app, pane_id, session_id, transcript_path,
                 checkpoint_ts, checkpoint_safe_to_clear, checkpoint_handoff_path,
-                checkpoint_consent_ts, manual_action, manual_action_ts
+                checkpoint_consent_ts, manual_action, manual_action_ts, last_seen
            FROM agents`
       )
       .all() as WatchedAgent[];
-    return rows.filter((r) => isProcessAlive(r.pid));
+    return rows.filter((r) => isAgentAlive(r));
   };
 
   const tick = async () => {

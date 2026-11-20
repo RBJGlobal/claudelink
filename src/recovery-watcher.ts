@@ -34,6 +34,7 @@ import {
   readRecoveryWatcherSettings,
   RecoveryWatcherSettings,
 } from "./recovery-watcher-settings.js";
+import { isAgentAlive } from "./liveness.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -279,13 +280,13 @@ function selectCandidates(db: Database.Database): NudgeCandidate[] {
   // unread mail (the recovery message itself is the trigger, not an inbox).
   const rows = db
     .prepare(
-      `SELECT id, role, tty, terminal_app, pane_id, pid
+      `SELECT id, role, tty, terminal_app, pane_id, pid, last_seen
        FROM agents
        WHERE tty IS NOT NULL
          AND terminal_app IS NOT NULL`
     )
     .all() as NudgeCandidate[];
-  return rows.filter((c) => isProcessAlive(c.pid));
+  return rows.filter((c) => isAgentAlive(c));
 }
 
 export interface RecoveryWatcherHandle {

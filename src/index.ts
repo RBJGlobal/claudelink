@@ -11,6 +11,7 @@ import path from "path";
 import os from "os";
 import { NexusDB } from "./db.js";
 import { roleCollisionWarning, fanoutNotice } from "./role-collision.js";
+import { resolveRegisterSettings } from "./register-settings.js";
 import { launchUIIfNeeded } from "./ui-launcher.js";
 import {
   HANDOFF_DIR,
@@ -179,7 +180,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           autonomousReply: {
             type: "boolean",
             description:
-              "Whether this agent should auto-process incoming messages via the Stop hook (default: true). Set to false for advisor-style agents that should read but never auto-reply.",
+              "Whether this agent should auto-process incoming messages via the Stop hook. Default: what this role registered with last time, otherwise true. Set to false for advisor-style agents that should read but never auto-reply.",
           },
         },
         required: ["role"],
@@ -317,9 +318,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "register": {
         const role = args?.role as string;
-        const description = (args?.description as string) || null;
-        const autonomousReply =
-          args?.autonomousReply === undefined ? true : Boolean(args.autonomousReply);
+        // An option the caller leaves out falls back to what this role
+        // registered with last time, then to the default. A seat resumed after
+        // a restart therefore keeps autonomousReply=false without having to
+        // remember it. An explicit value always wins.
+        const { description, autonomousReply, restored } = resolveRegisterSettings(
+          { description: args?.description, autonomousReply: args?.autonomousReply },
+          db.getRoleSettings(role)
+        );
 
         const tty = detectTty();
         currentAgentId = db.registerAgent(role, description, process.pid, {
@@ -329,6 +335,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           autonomousReply,
         });
         currentRole = role;
+        db.saveRoleSettings(role, description, autonomousReply);
 
         // Heartbeat every 30 seconds. Clear any prior interval first so a
         // re-register in the same process doesn't accumulate timers.
@@ -351,6 +358,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // #2 — warn if this role already has a live holder: a directed send to a
         // shared role fans out to all of them (see role-collision.ts).
         const roleSiblings = otherAgents.filter((a) => a.role === role && a.alive);
+        if (restored.length > 0) {
+          response += `\n\nKept from this role's previous registration: ${restored.join("; ")}. Pass the option to register to change it.`;
+        }
+        const carried = db.lastRegisterCarriedOver;
+        if (carried > 0) {
+          response += `\n\n${carried} unread message${carried === 1 ? "" : "s"} carried over from this role's previous registration. Call read_inbox.`;
+        }
         const collision = roleCollisionWarning(role, roleSiblings);
         if (collision) response += `\n\n${collision}`;
         if (otherAgents.length > 0) {

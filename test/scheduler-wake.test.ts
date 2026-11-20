@@ -12,7 +12,8 @@ function freshDb() {
   db.exec(`
     CREATE TABLE agents (
       id TEXT PRIMARY KEY, role TEXT, tty TEXT, terminal_app TEXT,
-      pane_id TEXT, pid INTEGER, autonomous_reply INTEGER DEFAULT 1
+      pane_id TEXT, pid INTEGER, autonomous_reply INTEGER DEFAULT 1,
+      last_seen TEXT DEFAULT (datetime('now'))
     );
     CREATE TABLE messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT, from_agent TEXT, to_agent TEXT,

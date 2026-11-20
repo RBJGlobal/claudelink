@@ -23,6 +23,7 @@ import {
   readSchedulerSettings,
   SchedulerSettings,
 } from "./scheduler-settings.js";
+import { isAgentAlive } from "./liveness.js";
 
 const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
@@ -153,7 +154,7 @@ export function selectCandidates(db: Database.Database): NudgeCandidate[] {
   // subquery means no nudge fires for an empty inbox.
   const rows = db
     .prepare(
-      `SELECT a.id, a.role, a.tty, a.terminal_app, a.pane_id, a.pid
+      `SELECT a.id, a.role, a.tty, a.terminal_app, a.pane_id, a.pid, a.last_seen
        FROM agents a
        WHERE a.tty IS NOT NULL
          AND a.autonomous_reply = 1
@@ -165,7 +166,7 @@ export function selectCandidates(db: Database.Database): NudgeCandidate[] {
          )`
     )
     .all() as NudgeCandidate[];
-  return rows.filter((c) => isProcessAlive(c.pid));
+  return rows.filter((c) => isAgentAlive(c));
 }
 
 // Per-agent recheck — guards against shared-broadcast races where an

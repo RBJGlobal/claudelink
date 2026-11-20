@@ -534,7 +534,9 @@ claudelink restore --go      # resume them
 
 The third case stops on purpose: typing plain `claude` there would quietly take every terminal off the meter. A session resumed with `--plain` is not metered until you quit it and resume it with `claude-metered --resume <id>`; nothing else about the session differs. To start metering later, follow the [Plan Usage](#plan-usage-meter--see-your-subscription-quota-v160-opt-in) section (start the proxy, add the `claude-metered` function).
 
-`restore --go` types the resume command into each matched pane, waits for Claude to start, then types "Register yourself as <role>, then read your handoff and resume." and confirms the registration arrived.
+`restore --go` types the resume command into each matched pane, waits for Claude to start, then types "Register yourself as <role>, then read your handoff and resume. Re-arm any watches your handoff lists." and confirms the registration arrived.
+
+**What follows the role across the restart** *(v1.6.17+)*. Unread messages sent to an agent before the restart are delivered to it when it registers again, and the register result says how many were carried over. A role also keeps the settings it last registered with: an agent that registered with `autonomousReply: false` stays that way when it registers again without the option.
 
 **How panes are matched.** In order: the iTerm2 pane id (iTerm2 keeps pane ids across a restart when it restores its windows); the folder, when one agent and one pane share it; pane order, when several agents share a folder in one window. The last case is marked *medium* and is skipped unless you pass `--allow-medium`. An agent with no unambiguous pane is listed as UNMATCHED and nothing is typed for it.
 

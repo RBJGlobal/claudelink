@@ -3,6 +3,8 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import crypto from "crypto";
+import { isAgentAlive, registeredBeforeBoot } from "./liveness.js";
+export { registeredBeforeBoot };
 
 export interface Agent {
   id: string;
@@ -76,15 +78,6 @@ const NEXUS_DIR = path.join(os.homedir(), ".claudelink");
 const DB_PATH = path.join(NEXUS_DIR, "nexus.db");
 function effectiveDbPath(): string {
   return process.env.CLAUDELINK_DB_PATH || DB_PATH;
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export class NexusDB {
@@ -257,6 +250,41 @@ export class NexusDB {
       });
       applyV6();
     }
+
+    // Last registration settings per role. An agents row is removed when its
+    // process dies, so after a restart nothing else remembers that a role
+    // registered with autonomousReply=false; a seat that then re-registers
+    // without the option would start auto-replying. Idempotent and outside the
+    // user_version chain on purpose: older servers sharing this file ignore it.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS role_settings (
+        role TEXT PRIMARY KEY,
+        description TEXT,
+        autonomous_reply INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+  }
+
+  getRoleSettings(role: string): { description: string | null; autonomousReply: boolean } | null {
+    const row = this.db
+      .prepare(`SELECT description, autonomous_reply FROM role_settings WHERE role = ?`)
+      .get(role) as { description: string | null; autonomous_reply: number } | undefined;
+    if (!row) return null;
+    return { description: row.description, autonomousReply: row.autonomous_reply === 1 };
+  }
+
+  saveRoleSettings(role: string, description: string | null, autonomousReply: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO role_settings (role, description, autonomous_reply, updated_at)
+         VALUES (?, ?, ?, datetime('now'))
+         ON CONFLICT(role) DO UPDATE SET
+           description = excluded.description,
+           autonomous_reply = excluded.autonomous_reply,
+           updated_at = excluded.updated_at`
+      )
+      .run(role, description, autonomousReply ? 1 : 0);
   }
 
   // Queue a founder-initiated manual /compact or /clear for an agent (set by the
@@ -284,6 +312,10 @@ export class NexusDB {
     return r.changes > 0;
   }
 
+  // Unread messages handed to the new id by the most recent registerAgent
+  // call. The register tool reports it so a restarted seat knows mail followed it.
+  lastRegisterCarriedOver = 0;
+
   registerAgent(
     role: string,
     description: string | null,
@@ -294,13 +326,18 @@ export class NexusDB {
     // seat before a restart or a resume). Note them before the prune so their
     // unread mail can be handed to the new id below; without this, mail sent
     // to the old id is never delivered, because read_inbox matches on id.
+    this.lastRegisterCarriedOver = 0;
     const predecessors = (
-      this.db.prepare(`SELECT id, pid FROM agents WHERE role = ?`).all(role) as {
+      this.db.prepare(`SELECT id, pid, last_seen, registered_at FROM agents WHERE role = ?`).all(role) as {
         id: string;
         pid: number;
+        last_seen: string | null;
+        registered_at: string | null;
       }[]
     )
-      .filter((a) => a.pid !== pid && !isProcessAlive(a.pid))
+      // This process's own row is alive and so never a predecessor, unless it
+      // dates from before the last boot and merely shares the pid number.
+      .filter((a) => !isAgentAlive(a))
       .map((a) => a.id);
 
     this.pruneDeadAgents(predecessors);
@@ -315,10 +352,12 @@ export class NexusDB {
     //       liveness probe edge cases)
     if (opts.tty) {
       const existing = this.db
-        .prepare(`SELECT id, role, pid FROM agents WHERE tty = ?`)
-        .get(opts.tty) as { id: string; role: string; pid: number } | undefined;
+        .prepare(`SELECT id, role, pid, last_seen, registered_at FROM agents WHERE tty = ?`)
+        .get(opts.tty) as
+        | { id: string; role: string; pid: number; last_seen: string | null; registered_at: string | null }
+        | undefined;
       if (existing) {
-        if (isProcessAlive(existing.pid)) {
+        if (isAgentAlive(existing)) {
           // SAME live process re-registering on its own TTY → this is the one
           // agent that owns this terminal changing/refreshing its role, NOT two
           // sessions fighting over a pane. Update in place and keep the same id
@@ -341,6 +380,7 @@ export class NexusDB {
                 opts.autonomousReply ? 1 : 0,
                 existing.id
               );
+            this.inheritFrom(predecessors.filter((p) => p !== existing.id), existing.id);
             return existing.id;
           }
           throw new Error(
@@ -351,12 +391,11 @@ export class NexusDB {
         // A predecessor on this tty is removed further down, after its
         // unread mail has moved to the new id.
         if (!predecessors.includes(existing.id)) {
-          const cleanupStale = this.db.transaction(() => {
-            this.db.prepare(`DELETE FROM messages WHERE from_agent = ?`).run(existing.id);
-            this.db.prepare(`DELETE FROM bulletin WHERE from_agent = ?`).run(existing.id);
-            this.db.prepare(`DELETE FROM agents WHERE id = ?`).run(existing.id);
-          });
-          cleanupStale();
+          // A dead row of ANOTHER role holds this tty (terminals get new tty
+          // numbers after a restart). Release the tty and leave the row: it may
+          // hold unread mail for its own role, which that role inherits when
+          // it registers. A row with no mail waiting goes at the next prune.
+          this.db.prepare(`UPDATE agents SET tty = NULL WHERE id = ?`).run(existing.id);
         }
       }
     }
@@ -379,25 +418,30 @@ export class NexusDB {
         opts.autonomousReply ? 1 : 0
       );
 
-    if (predecessors.length > 0) {
-      const ph = predecessors.map(() => "?").join(",");
-      const inherit = this.db.transaction(() => {
-        // Unread mail addressed to the old id, and unread mail the old id
-        // sent that its recipients have not seen yet, both carry over.
-        this.db
-          .prepare(`UPDATE messages SET to_agent = ? WHERE read = 0 AND to_agent IN (${ph})`)
-          .run(id, ...predecessors);
-        this.db
-          .prepare(`UPDATE messages SET from_agent = ? WHERE read = 0 AND from_agent IN (${ph})`)
-          .run(id, ...predecessors);
-        this.db.prepare(`DELETE FROM messages WHERE from_agent IN (${ph})`).run(...predecessors);
-        this.db.prepare(`DELETE FROM bulletin WHERE from_agent IN (${ph})`).run(...predecessors);
-        this.db.prepare(`DELETE FROM agents WHERE id IN (${ph})`).run(...predecessors);
-      });
-      inherit();
-    }
+    this.inheritFrom(predecessors, id);
 
     return id;
+  }
+
+  // Hands the unread mail of dead predecessor rows to `id`, then removes them.
+  private inheritFrom(predecessors: string[], id: string): void {
+    if (predecessors.length === 0) return;
+    const ph = predecessors.map(() => "?").join(",");
+    const inherit = this.db.transaction(() => {
+      // Unread mail addressed to the old id, and unread mail the old id
+      // sent that its recipients have not seen yet, both carry over.
+      const moved = this.db
+        .prepare(`UPDATE messages SET to_agent = ? WHERE read = 0 AND to_agent IN (${ph})`)
+        .run(id, ...predecessors);
+      this.lastRegisterCarriedOver = moved.changes;
+      this.db
+        .prepare(`UPDATE messages SET from_agent = ? WHERE read = 0 AND from_agent IN (${ph})`)
+        .run(id, ...predecessors);
+      this.db.prepare(`DELETE FROM messages WHERE from_agent IN (${ph})`).run(...predecessors);
+      this.db.prepare(`DELETE FROM bulletin WHERE from_agent IN (${ph})`).run(...predecessors);
+      this.db.prepare(`DELETE FROM agents WHERE id IN (${ph})`).run(...predecessors);
+    });
+    inherit();
   }
 
   getAgentByTty(tty: string): Agent | null {
@@ -405,7 +449,7 @@ export class NexusDB {
       .prepare(`SELECT * FROM agents WHERE tty = ?`)
       .get(tty) as Omit<Agent, "alive"> | undefined;
     if (!row) return null;
-    return { ...row, alive: isProcessAlive(row.pid) };
+    return { ...row, alive: isAgentAlive(row) };
   }
 
   heartbeat(agentId: string): void {
@@ -457,7 +501,7 @@ export class NexusDB {
 
     return rows.map((row) => ({
       ...row,
-      alive: isProcessAlive(row.pid),
+      alive: isAgentAlive(row),
     }));
   }
 
@@ -678,14 +722,14 @@ export class NexusDB {
   // successor registers, or with "Heal orphans" in the Command Center.
   pruneDeadAgents(keep: string[] = []): void {
     const agents = this.db
-      .prepare(`SELECT id, pid FROM agents`)
-      .all() as { id: string; pid: number }[];
+      .prepare(`SELECT id, pid, last_seen, registered_at FROM agents`)
+      .all() as { id: string; pid: number; last_seen: string | null; registered_at: string | null }[];
 
     const hasUnread = this.db.prepare(
       `SELECT 1 FROM messages WHERE to_agent = ? AND read = 0 LIMIT 1`
     );
     const deadIds = agents
-      .filter((a) => !isProcessAlive(a.pid))
+      .filter((a) => !isAgentAlive(a))
       .map((a) => a.id)
       .filter((id) => !keep.includes(id) && hasUnread.get(id) === undefined);
 
