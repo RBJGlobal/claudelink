@@ -47,6 +47,9 @@ export interface ManualDecisionInput {
   // Throttles re-asking; does NOT throttle firing.
   msSinceLastAsk: number | null;
   askCooldownMs: number;
+  // A /compact or /clear was typed to this agent moments ago. Holds back the
+  // ASK only, for a few minutes, far less than the request's lifetime.
+  fireQuiet?: boolean;
   // Age of the pending request (now - requestedTs). Past ttl → expire.
   ageMs: number;
   ttlMs: number;
@@ -91,6 +94,7 @@ export function decideManualAction(i: ManualDecisionInput): ManualAction {
   // No fire-eligible consent yet → ASK. Only when idle (won't interrupt), and
   // throttled so we don't re-ask every tick while waiting for the agent.
   if (!i.idle) return { kind: "skip", reason: "not-idle" };
+  if (i.fireQuiet) return { kind: "skip", reason: "fire-quiet" };
   if (i.msSinceLastAsk !== null && i.msSinceLastAsk < i.askCooldownMs)
     return { kind: "skip", reason: "ask-cooldown" };
   return { kind: "ask" };

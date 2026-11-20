@@ -47,6 +47,9 @@ export interface CompactDecisionInput {
   // Throttles re-asking; does NOT throttle firing.
   msSinceLastAsk: number | null;
   askCooldownMs: number;
+  // A /compact was typed to this agent moments ago (see inFireQuiet). Holds
+  // back the ASK only.
+  fireQuiet?: boolean;
 }
 
 // Precedence: ambiguous → FIRE (durable consent) → ASK (throttled) → skip.
@@ -69,7 +72,29 @@ export function decideCompactAction(i: CompactDecisionInput): CompactAction {
   // so only when idle (won't interrupt) and economically worth it.
   if (!i.idle) return { kind: "skip", reason: "not-idle" };
   if (!i.economicGreen) return { kind: "skip", reason: "economics-below-overhead" };
+  if (i.fireQuiet) return { kind: "skip", reason: "fire-quiet" };
   if (i.msSinceLastAsk !== null && i.msSinceLastAsk < i.askCooldownMs)
     return { kind: "skip", reason: "ask-cooldown" };
   return { kind: "ask" };
+}
+
+// Quiet period after a FIRE. For 30 to 60 s after /compact is typed the
+// transcript still shows the pre-compact size, so the next tick would see
+// "over threshold, no consent" and ask again while the compact is running
+// (seen 2026-11-20: fire at 15:37:31Z, a second ask at 15:38:03Z). A short
+// dedicated quiet period covers that window. It is separate from the ask
+// cooldown on purpose: the cooldown is as long as a founder click lives
+// (30 min), so reusing it would let a click made soon after a fire expire
+// before its consent prompt was ever typed. This only ever suppresses an ASK;
+// neither decision function reads it on the FIRE branch.
+export const FIRE_QUIET_MS = 5 * 60 * 1000;
+
+// lastFiredAt after a fire attempt: a keystroke that landed ("ok") or may have
+// landed ("unknown") starts the quiet period; one that did not leaves it alone.
+export function firedAtAfter(result: string, nowMs: number, lastFiredAt: number): number {
+  return result === "ok" || result === "unknown" ? nowMs : lastFiredAt;
+}
+
+export function inFireQuiet(lastFiredAt: number, nowMs: number, quietMs = FIRE_QUIET_MS): boolean {
+  return lastFiredAt > 0 && nowMs - lastFiredAt < quietMs;
 }

@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { decideCompactAction, CompactDecisionInput } from "../src/compact-decision.js";
+import { decideCompactAction, CompactDecisionInput, firedAtAfter, inFireQuiet, FIRE_QUIET_MS } from "../src/compact-decision.js";
 
 const MIN = 60 * 1000;
 
@@ -104,4 +104,34 @@ test("asked long ago (past cooldown), still no consent → ASK again", () => {
     decideCompactAction({ ...base(), msSinceLastAsk: 31 * MIN }),
     { kind: "ask" }
   );
+});
+
+test("a fire that landed starts the quiet period; one that did not leaves it alone", () => {
+  assert.equal(firedAtAfter("ok", 5000, 0), 5000);
+  assert.equal(firedAtAfter("unknown", 5000, 1000), 5000);
+  assert.equal(firedAtAfter("fail", 5000, 1000), 1000);
+  assert.equal(firedAtAfter("skip", 5000, 0), 0);
+});
+
+test("inFireQuiet: only within the quiet period after a real fire", () => {
+  assert.equal(inFireQuiet(0, 10 * MIN), false); // never fired
+  assert.equal(inFireQuiet(10 * MIN, 10 * MIN + 32_000), true);
+  assert.equal(inFireQuiet(10 * MIN, 10 * MIN + FIRE_QUIET_MS), false);
+});
+
+test("32 s after a fire: consent consumed, size still stale, never asked: no second ASK", () => {
+  // The 2026-11-20 sequence. The agent consented without being asked, so the
+  // ask clock is empty; only the quiet period stands between it and a prompt.
+  const firedAt = firedAtAfter("ok", 100 * MIN, 0);
+  const now = firedAt + 32_000;
+  const r = decideCompactAction({ ...base(), fireQuiet: inFireQuiet(firedAt, now) });
+  assert.deepEqual(r, { kind: "skip", reason: "fire-quiet" });
+  // Once the quiet period is over the ASK is available again.
+  const later = firedAt + FIRE_QUIET_MS;
+  assert.deepEqual(decideCompactAction({ ...base(), fireQuiet: inFireQuiet(firedAt, later) }), { kind: "ask" });
+});
+
+test("the quiet period never blocks a FIRE on fresh consent", () => {
+  const r = decideCompactAction({ ...base(), safeToClear: true, consentAgeMs: 1 * MIN, fireQuiet: true });
+  assert.deepEqual(r, { kind: "fire" });
 });

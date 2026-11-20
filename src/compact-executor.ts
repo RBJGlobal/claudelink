@@ -113,6 +113,31 @@ export function verifyHandoff(file: string): { ok: boolean; bytes: number } {
   }
 }
 
+// One sentence telling the agent how old its handoff file is, so a seat that
+// checkpoints on a stale handoff sees it at once. Pure apart from the stat the
+// caller does: `mtimeMs` is null when the file does not exist. Only ever
+// called for a path that passed isHandoffPathSafe.
+export function handoffAgeNote(mtimeMs: number | null, nowMs: number): string {
+  if (mtimeMs === null) return " Handoff file not found at that path.";
+  const min = Math.max(0, Math.floor((nowMs - mtimeMs) / 60000));
+  const when =
+    min < 1 ? "less than a minute ago"
+    : min < 120 ? `${min} minute${min === 1 ? "" : "s"} ago`
+    : min < 2880 ? `${Math.floor(min / 60)} hours ago`
+    : `${Math.floor(min / 1440)} days ago`;
+  const stale = min >= 30 ? " If you have done work since then, update it and call signal_checkpoint again." : "";
+  return ` Handoff file last changed ${when}.${stale}`;
+}
+
+export function handoffMtimeMs(file: string): number | null {
+  try {
+    const st = fs.statSync(file);
+    return st.isFile() ? st.mtimeMs : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface CompactStep {
   action:
     | "send-prepare-prompt"

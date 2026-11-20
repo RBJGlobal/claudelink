@@ -17,6 +17,8 @@ import {
   HANDOFF_DIR,
   isHandoffPathSafe,
   verifyHandoff,
+  handoffAgeNote,
+  handoffMtimeMs,
 } from "./compact-executor.js";
 
 const db = new NexusDB();
@@ -532,6 +534,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        const ageNote = handoffPath ? handoffAgeNote(handoffMtimeMs(handoffPath), Date.now()) : "";
+
         db.setCheckpoint(agentId, { safeToClear, handoffPath, note });
         appendCheckpointLog(
           `signal role=${currentRole ?? "?"} agent=${agentId.slice(0, 8)} ` +
@@ -545,6 +549,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "text",
               text:
                 "Checkpoint recorded. ClaudeLink weighs this safe-signal against measured context cost; for roles on the armed allowlist a real /compact may follow when the size + economic + idle + handoff gates all pass. Off-allowlist roles are recorded for calibration only." +
+                ageNote +
                 pathFeedback,
             },
           ],

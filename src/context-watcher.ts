@@ -44,7 +44,7 @@ import {
 } from "./context-watcher-settings.js";
 import { injectKeystroke, NudgeCandidate } from "./scheduler.js";
 import { verifyHandoff } from "./compact-executor.js";
-import { decideCompactAction } from "./compact-decision.js";
+import { decideCompactAction, firedAtAfter, inFireQuiet } from "./compact-decision.js";
 import { decideManualAction } from "./manual-decision.js";
 import { isAgentAlive } from "./liveness.js";
 
@@ -658,6 +658,9 @@ interface SessionState {
   // T1 handshake: last time we typed the consent ASK to this agent. Throttles
   // re-asking (NOT firing) — firing rests on durable DB consent, not this.
   lastAskedAt: number;
+  // Last time a /compact or /clear keystroke was typed (or may have been).
+  // Starts the short post-fire quiet period for the ASK.
+  lastFiredAt?: number;
 }
 
 export interface ContextWatcherHandle {
@@ -826,6 +829,7 @@ export function startContextWatcher(): ContextWatcherHandle {
           // cooldown after the click.
           msSinceLastAsk: st.lastAskedAt > 0 ? now - st.lastAskedAt : null,
           askCooldownMs: cooldownMs,
+          fireQuiet: inFireQuiet(st.lastFiredAt ?? 0, now),
           ageMs,
           ttlMs: MANUAL_TTL_MS,
         });
@@ -896,6 +900,8 @@ export function startContextWatcher(): ContextWatcherHandle {
           clearManualAction(a.id);
           summary.injected++;
         }
+        st.lastFiredAt = firedAtAfter(result, now, st.lastFiredAt ?? 0);
+        state.set(a.id, st);
         logGateStatus({
           ...(mFields as GateStatusFields),
           decision: "manual-FIRE",
@@ -1120,6 +1126,7 @@ export function startContextWatcher(): ContextWatcherHandle {
             economicGreen,
             msSinceLastAsk: st.lastAskedAt > 0 ? now - st.lastAskedAt : null,
             askCooldownMs: cooldownMs,
+            fireQuiet: inFireQuiet(st.lastFiredAt ?? 0, now),
           });
 
           const candidate: NudgeCandidate = {
@@ -1194,6 +1201,7 @@ export function startContextWatcher(): ContextWatcherHandle {
           // burning it (oneShot's latch masks this today, but non-oneShot
           // would otherwise drop the compact entirely).
           if (result === "ok" || result === "unknown") consumeConsent(a.id);
+          st.lastFiredAt = firedAtAfter(result, now, st.lastFiredAt ?? 0);
           summary.injected++;
           st.lastNudgedAt = now;
           st.nudgeCount++;

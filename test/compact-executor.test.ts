@@ -137,3 +137,16 @@ test("handoffPathFor returns a path under HANDOFF_DIR", () => {
   // And the returned path is itself safe (round-trip property)
   assert.equal(isHandoffPathSafe(p), true);
 });
+
+import { handoffAgeNote, handoffMtimeMs } from "../src/compact-executor.js";
+
+test("handoffAgeNote: fresh, stale and missing files", () => {
+  const now = 10_000_000_000;
+  assert.equal(handoffAgeNote(now - 20_000, now), " Handoff file last changed less than a minute ago.");
+  assert.equal(handoffAgeNote(now - 5 * 60_000, now), " Handoff file last changed 5 minutes ago.");
+  assert.match(handoffAgeNote(now - 45 * 60_000, now), /45 minutes ago\. If you have done work since then/);
+  assert.match(handoffAgeNote(now - 5 * 3600_000, now), /5 hours ago/);
+  assert.match(handoffAgeNote(now - 3 * 86400_000, now), /3 days ago/);
+  assert.equal(handoffAgeNote(null, now), " Handoff file not found at that path.");
+  assert.equal(handoffMtimeMs("/nonexistent/claudelink/handoff.md"), null);
+});

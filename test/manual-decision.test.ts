@@ -140,3 +140,8 @@ test("consent exactly AT requestedTs does not count (strictly-after required)", 
   });
   assert.deepEqual(r, { kind: "ask" });
 });
+
+test("a click during the post-fire quiet period waits, then asks; it is not held for the ask cooldown", () => {
+  assert.deepEqual(decideManualAction({ ...base(), fireQuiet: true }), { kind: "skip", reason: "fire-quiet" });
+  assert.deepEqual(decideManualAction({ ...base(), fireQuiet: false }), { kind: "ask" });
+});
