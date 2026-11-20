@@ -20,6 +20,35 @@ You don't need to invent a multi-agent framework. You already have one.
 
 ---
 
+## Restart your computer without losing your team
+
+A system update, a frozen machine or a dead battery ends every agent session at once. Without help, getting back means finding each session id, resuming it in the right pane, and reminding each agent what its role is and what it was doing. With ten terminals that is most of an hour, and it is easy to get wrong.
+
+ClaudeLink turns it into one click before the restart and two commands after it.
+
+| Step | What you do | What ClaudeLink does |
+|---|---|---|
+| **Before** | Click **Prepare for restart** in the Command Center | Asks every agent to save its handoff notes and confirm. Shows "Safe to restart" when all have answered. |
+| **Restart** | Restart the computer. Let iTerm2 reopen its windows. | Nothing. The record of which session sat in which pane was already saved, about once a minute. |
+| **After** | Run `claudelink restore`, check the preview, then `claudelink restore --go` | Resumes each session in its own pane, with its full conversation, then tells each agent to register under its role and continue from its handoff. |
+
+What you get back:
+
+- **The same conversations.** Each terminal resumes its own Claude Code session, not a fresh one.
+- **The same layout.** Each session returns to the pane it was in.
+- **The same team.** Every agent registers under its role again, so messages reach it as before.
+- **The same work.** Each agent reads its handoff and carries on from where it stopped.
+
+You see a preview before anything is typed, and a pane that is busy or cannot be matched with certainty is skipped and reported, not guessed at.
+
+It also covers the restart you did not plan. The pane record is written continuously, so after a crash or a power cut `claudelink restore` still brings every session back with its conversation. Only the final handoff notes from **Prepare for restart** are missing.
+
+Works with Claude Code sessions in iTerm2. Full details: [Fleet restore](#fleet-restore--bring-every-terminal-back-after-a-restart-v1613-iterm2).
+
+> **Two kinds of interruption, both handled.** [Recovery Watcher](#3-recovery-watcher-api-error-auto-recovery) gets an agent moving again when a provider API error stops it mid-task. Fleet restore brings the whole team back after the computer restarts.
+
+---
+
 ## Why ClaudeLink exists
 
 A single AI coding agent is fast. Five agents running in parallel — each owning a slice of the work, talking to each other, escalating, reviewing, retrying — is a different category of tool entirely.
@@ -34,6 +63,8 @@ The blocker has always been the human in the loop: someone has to type *"check m
 | You poll every terminal for updates | Auto-nudge wakes the right agent at the right time |
 | No single view of the work | Live Command Center at `127.0.0.1:7878` |
 | Every session is amnesiac to the others | Shared SQLite mesh + persistent bulletin board |
+| A restart means rebuilding every session by hand | Fleet restore resumes every session in its own pane with two commands |
+| A provider API error leaves an agent stopped until you notice | Recovery Watcher detects the stop and gets the agent going again |
 
 If one agent already gives you a 2× lift, a coordinated heterogeneous team can get you to **3–5×** without adding a second subscription you don't already own, a second machine, or a second human.
 
