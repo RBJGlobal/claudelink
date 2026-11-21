@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findTty, psLookup, ProcInfo } from "../src/tty-detect.js";
+import { findTty, psLookup, ProcInfo, isCodexCliHelper, pickSessionTty } from "../src/tty-detect.js";
 
 const table = (t: Record<number, ProcInfo>) => (pid: number) => t[pid] ?? null;
 
@@ -32,4 +32,27 @@ test("psLookup reads this test's own process", () => {
   const me = psLookup(process.pid);
   assert.ok(me);
   assert.equal(me.ppid, process.ppid);
+});
+
+test("only the Codex CLI helper triggers the working-directory match", () => {
+  assert.equal(isCodexCliHelper("/Users/x/.codex/packages/app-server-daemon/bin/codex app-server --listen unix:/tmp/s"), true);
+  assert.equal(isCodexCliHelper("codex -c a=b app-server"), true);
+  // the desktop app has no pane
+  assert.equal(isCodexCliHelper("/Applications/Some.app/Contents/Resources/cli/codex -c a=b app-server"), false);
+  assert.equal(isCodexCliHelper("codex resume abc"), false);
+  assert.equal(isCodexCliHelper("node /usr/local/bin/claude"), false);
+  assert.equal(isCodexCliHelper(null), false);
+});
+
+test("the pane is the one session in the same directory, or nothing", () => {
+  const a = { tty: "/dev/ttys013", cwd: "/work/a" };
+  const b = { tty: "/dev/ttys014", cwd: "/work/b" };
+  assert.equal(pickSessionTty("/work/a", [a, b]), "/dev/ttys013");
+  assert.equal(pickSessionTty("/work/c", [a, b]), null);
+  assert.equal(pickSessionTty("/work/a", []), null);
+  // two sessions in one directory: cannot tell them apart
+  assert.equal(pickSessionTty("/work/a", [a, { tty: "/dev/ttys015", cwd: "/work/a" }]), null);
+  // two processes of one session on the same pane are one match
+  assert.equal(pickSessionTty("/work/a", [a, { ...a }]), "/dev/ttys013");
+  assert.equal(pickSessionTty("/work/a", [{ tty: "/dev/ttys013", cwd: null }]), null);
 });

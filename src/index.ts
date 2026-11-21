@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { findTty, psLookup } from "./tty-detect.js";
+import { detectSessionTty } from "./tty-detect.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
@@ -46,7 +46,7 @@ function appendCheckpointLog(line: string): void {
 // The MCP server's own stdin/stdout are pipes (JSON-RPC), so process.stdout.isTTY
 // is false. See tty-detect.ts for why ancestors beyond the parent are checked.
 function detectTty(): string | null {
-  return findTty(process.ppid, psLookup);
+  return detectSessionTty(process.ppid, process.cwd());
 }
 
 function detectTerminalAppByTty(tty: string): string | null {

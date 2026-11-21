@@ -44,3 +44,61 @@ export function psLookup(pid: number): ProcInfo | null {
     return null;
   }
 }
+
+// ── Codex CLI fallback ──────────────────────────────────────────────────────
+// Codex keeps its app-server helper alive after the session quits; a resumed
+// session reuses it, and by then the helper's parent is launchd, so the walk
+// above finds no tty. The server and the `codex` session do share a working
+// directory, so the pane is found by that instead.
+
+export interface CliSession {
+  tty: string;
+  cwd: string | null;
+}
+
+// Pure. True when the server was started by the Codex CLI helper. The desktop
+// app ships its own copy inside an .app bundle; it has no pane and is left out.
+export function isCodexCliHelper(parentCommand: string | null): boolean {
+  if (!parentCommand) return false;
+  return /(^|\/)codex\s+.*\bapp-server\b/.test(parentCommand) && !/\.app\//.test(parentCommand);
+}
+
+// Pure. The tty of the one Codex session running in `serverCwd`. Zero or
+// several matches give null: a nudge typed into the wrong pane is worse than
+// no nudge.
+export function pickSessionTty(serverCwd: string, sessions: CliSession[]): string | null {
+  const ttys = new Set(sessions.filter((s) => s.cwd === serverCwd).map((s) => s.tty));
+  return ttys.size === 1 ? [...ttys][0] : null;
+}
+
+function run(cmd: string, args: string[]): string {
+  try {
+    return execFileSync(cmd, args, { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return "";
+  }
+}
+
+function cwdOf(pid: number): string | null {
+  const m = run("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]).match(/^n(.+)$/m);
+  return m ? m[1] : null;
+}
+
+function codexSessions(): CliSession[] {
+  const out: CliSession[] = [];
+  for (const line of run("ps", ["-eo", "pid=,tty=,command="]).split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
+    if (!m || m[2] === "??" || m[2] === "?") continue;
+    if (!/^(\S*\/)?codex(\s|$)/.test(m[3]) || /\bapp-server\b/.test(m[3])) continue;
+    out.push({ tty: m[2].startsWith("/dev/") ? m[2] : `/dev/${m[2]}`, cwd: cwdOf(Number(m[1])) });
+  }
+  return out;
+}
+
+// The terminal of the session that started this server, or null.
+export function detectSessionTty(ppid: number, cwd: string): string | null {
+  const direct = findTty(ppid, psLookup);
+  if (direct) return direct;
+  if (!isCodexCliHelper(run("ps", ["-p", String(ppid), "-o", "command="]).trim() || null)) return null;
+  return pickSessionTty(cwd, codexSessions());
+}
