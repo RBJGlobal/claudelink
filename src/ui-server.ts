@@ -837,6 +837,15 @@ const HTML = String.raw`<!doctype html>
     .plan-stale-banner { display:none; margin:0 0 12px; padding:8px 10px; border-radius:6px; font-size:13px; background:rgba(210,153,34,.12); border:1px solid #d29922; }
     #plan-usage-panel.plan-stale .plan-stale-banner { display:block; }
   </style>
+  <section class="panel full" id="prep-panel" style="display:none">
+    <h2>Is everyone parked? <span class="count" id="prep-count">0</span></h2>
+    <div class="mono" id="prep-verdict" style="margin-bottom:8px"></div>
+    <table id="prep-table">
+      <thead><tr><th>Terminal</th><th>Parked</th><th>Unread mail</th><th>Note</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
   <section class="panel full" id="plan-usage-panel" style="display:none">
     <h2>Plan Usage <span class="count" id="plan-binding">—</span></h2>
     <div class="body">
@@ -1099,12 +1108,16 @@ function render(state) {
   } else {
     const total = rp.ready.length + rp.waiting.length;
     let t = "Restart prep: " + rp.ready.length + " of " + total + " ready";
+    // Older servers send no per-terminal rows; then "all ready" is the only test.
+    const safe = rp.rows ? rp.safe : (total > 0 && !rp.waiting.length && !rp.failed.length);
     if (rp.waiting.length) t += ". Waiting: " + rp.waiting.join(", ");
-    else if (total > 0) t += ". Safe to restart.";
+    else if (safe) t += ". Safe to restart.";
+    else if (total > 0 && !rp.failed.length) t += ". Check the list below before restarting.";
     if (rp.failed.length) t += ". Not reached: " + rp.failed.join(", ");
     rpEl.textContent = t;
-    rpEl.style.color = rp.waiting.length || rp.failed.length ? "#e0a84a" : "#5fd08a";
+    rpEl.style.color = safe ? "#5fd08a" : "#e0a84a";
   }
+  renderPrepPanel(rp);
   // servers
   $("srv-count").textContent = state.servers.length;
   const sb = $("srv-table").querySelector("tbody");
@@ -1235,6 +1248,38 @@ function render(state) {
   }
 
   $("last-update").textContent = "updated " + new Date().toLocaleTimeString();
+}
+
+function renderPrepPanel(rp) {
+  const panel = $("prep-panel");
+  if (!rp || !rp.rows || !rp.rows.length) { panel.style.display = "none"; return; }
+  panel.style.display = "";
+  const parked = rp.rows.filter(function (r) { return r.state === "parked"; }).length;
+  $("prep-count").textContent = parked + " of " + rp.rows.length;
+  const v = $("prep-verdict");
+  v.textContent = rp.safe
+    ? "Every terminal is parked. Safe to restart."
+    : "Not safe to restart yet. The rows in amber or red need attention.";
+  v.style.color = rp.safe ? "#5fd08a" : "#e0a84a";
+  const tb = $("prep-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const r of rp.rows) {
+    const notes = [];
+    let pill;
+    if (r.state === "parked") pill = '<span class="pill alive">yes</span>';
+    else if (r.state === "waiting") { pill = '<span class="pill warn">not yet</span>'; notes.push("Has not confirmed its handoff."); }
+    else { pill = '<span class="pill dead">not reached</span>'; notes.push("The prompt did not reach this terminal. Use Retry not reached."); }
+    if (r.activeAfterPark) notes.push("Kept working after it parked. Its handoff may be out of date.");
+    if (r.unreadHigh > 0) notes.push(r.unreadHigh + " unread high-priority message" + (r.unreadHigh === 1 ? "" : "s") + ".");
+    const bad = r.state !== "parked" || r.activeAfterPark || r.unreadHigh > 0;
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      '<td>' + escapeHtml(r.role) + '</td>' +
+      '<td>' + pill + '</td>' +
+      '<td class="mono">' + r.unread + '</td>' +
+      '<td' + (bad ? ' style="color:#e0a84a"' : '') + '>' + escapeHtml(notes.join(" ")) + '</td>';
+    tb.appendChild(tr);
+  }
 }
 
 function escapeHtml(s) {

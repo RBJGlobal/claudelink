@@ -6,6 +6,7 @@
 // confirmation never doubles as consent to a /compact.
 
 import Database from "better-sqlite3";
+import * as fs from "fs";
 import { injectKeystroke, NudgeCandidate } from "./scheduler.js";
 import { waitForIterm, paneContents } from "./iterm.js";
 import { isAgentAlive } from "./liveness.js";
@@ -29,13 +30,98 @@ export interface PrepStatus {
   ready: string[];
   waiting: string[];
   failed: string[];
+  rows?: PrepRow[];
+  safe?: boolean;
+}
+
+// One line per terminal in the "is everyone parked?" view.
+export interface PrepRow {
+  role: string;
+  state: "parked" | "waiting" | "not-reached";
+  unread: number;
+  unreadHigh: number;
+  // The terminal's transcript changed well after it confirmed: it kept working.
+  activeAfterPark: boolean;
+}
+
+export interface PrepFacts {
+  checkpointTs: number | null;
+  unread: number;
+  unreadHigh: number;
+  lastActivityMs: number | null; // transcript last-modified, when known
+  // False when the confirmation came from a server too old to record its
+  // time; then "kept working" cannot be judged and is not claimed.
+  confirmTimeKnown?: boolean;
+}
+
+// Pure. When did this agent confirm, as far as the row can tell?
+//  - signalTs is written only by signal_checkpoint (servers from 1.6.19).
+//  - An older server leaves signalTs empty but still writes the note. The
+//    note is cleared when the prompt is typed, so a note that is back means
+//    signal_checkpoint was called after the click; the time is not known.
+export function confirmation(
+  signalTs: number | null | undefined,
+  note: string | null | undefined,
+  clickAt: number
+): { ts: number | null; timeKnown: boolean } {
+  if (signalTs != null) return { ts: signalTs, timeKnown: true };
+  if (note != null && note !== "") return { ts: clickAt + 1, timeKnown: false };
+  return { ts: null, timeKnown: false };
+}
+
+// The checkpoint call and its reply are themselves written to the transcript,
+// so activity only counts when it is clearly later than the confirmation.
+export const PARK_ACTIVITY_SLACK_MS = 2 * 60 * 1000;
+
+// Pure. `facts` is keyed by agent id; `byRole` holds the same facts keyed by
+// role, for terminals the prompt did not reach or that have a new id since.
+// checkpointTs must be the time of the agent's own signal_checkpoint call.
+export function prepRows(
+  req: PrepRequest,
+  facts: Map<string, PrepFacts>,
+  failedFacts: Map<string, PrepFacts> = new Map()
+): PrepRow[] {
+  const rows: PrepRow[] = [];
+  for (const a of req.asked) {
+    // A terminal that re-registered since the click has a new id and its mail
+    // moved with it: show the role's current mail, but it stays "waiting".
+    const own = facts.get(a.id);
+    const f = own ?? failedFacts.get(a.role);
+    const ts = own?.checkpointTs ?? null;
+    const parked = ts != null && ts > req.at;
+    rows.push({
+      role: a.role,
+      state: parked ? "parked" : "waiting",
+      unread: f?.unread ?? 0,
+      unreadHigh: f?.unreadHigh ?? 0,
+      activeAfterPark:
+        parked && own?.confirmTimeKnown !== false && f?.lastActivityMs != null &&
+        f.lastActivityMs > (ts as number) + PARK_ACTIVITY_SLACK_MS,
+    });
+  }
+  for (const role of req.failed) {
+    const f = failedFacts.get(role);
+    rows.push({
+      role,
+      state: "not-reached",
+      unread: f?.unread ?? 0,
+      unreadHigh: f?.unreadHigh ?? 0,
+      activeAfterPark: false,
+    });
+  }
+  return rows;
+}
+
+// Pure. Safe to restart only when at least one terminal was asked, every one
+// is parked and none has kept working or holds an unread high-priority message.
+export function prepSafe(rows: PrepRow[]): boolean {
+  return (
+    rows.length > 0 &&
+    rows.every((r) => r.state === "parked" && !r.activeAfterPark && r.unreadHigh === 0)
+  );
 }
 
 let current: PrepRequest | null = null;
-
-function isAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
 
 // Pure. `stamps` maps agent id -> checkpoint_ts (ms) for agents that still exist.
 export function prepStatus(req: PrepRequest, stamps: Map<string, number | null>): PrepStatus {
@@ -73,9 +159,12 @@ async function askOne(c: NudgeCandidate): Promise<boolean> {
   return false;
 }
 
-async function askMany(rows: NudgeCandidate[], req: PrepRequest): Promise<void> {
+async function askMany(db: Database.Database, rows: NudgeCandidate[], req: PrepRequest): Promise<void> {
   for (const c of rows) {
     if (!isAgentAlive(c)) continue;
+    // Clear the last checkpoint note before asking, so a note seen later was
+    // written after this click (see `confirmation`).
+    try { db.prepare(`UPDATE agents SET checkpoint_note = NULL WHERE id = ?`).run(c.id); } catch { /* older schema */ }
     if (await askOne(c)) req.asked.push({ id: c.id, role: c.role });
     else req.failed.push(c.role);
   }
@@ -91,7 +180,7 @@ const liveRows = (db: Database.Database) =>
 
 export async function askAllToPrepare(db: Database.Database): Promise<PrepStatus> {
   const req: PrepRequest = { at: Date.now(), asked: [], failed: [] };
-  await askMany(liveRows(db), req);
+  await askMany(db, liveRows(db), req);
   current = req;
   return prepStatus(req, new Map());
 }
@@ -102,7 +191,7 @@ export async function retryNotReached(db: Database.Database): Promise<PrepStatus
   if (!current) return null;
   const want = new Set(current.failed);
   current.failed = [];
-  await askMany(liveRows(db).filter((c) => want.has(c.role)), current);
+  await askMany(db, liveRows(db).filter((c) => want.has(c.role)), current);
   return currentPrepStatus(db);
 }
 
@@ -111,13 +200,65 @@ export function currentPrepStatus(db: Database.Database): PrepStatus | null {
   // A request older than 6 hours is no longer shown.
   if (Date.now() - current.at > 6 * 3600 * 1000) { current = null; return null; }
   const stamps = new Map<string, number | null>();
+  const timeKnown = new Map<string, boolean>();
+  const facts = new Map<string, PrepFacts>();
+  const failedFacts = new Map<string, PrepFacts>();
+  // checkpoint_ts is not used: the Stop hook refreshes it at every turn end,
+  // which would count a terminal as confirmed before it had read the prompt.
+  let rows: { id: string; signal_ts: number | null; note: string | null }[] = [];
   try {
-    const rows = db.prepare(`SELECT id, checkpoint_ts FROM agents`).all() as {
-      id: string; checkpoint_ts: number | null;
-    }[];
-    for (const r of rows) stamps.set(r.id, r.checkpoint_ts);
+    rows = db.prepare(`SELECT id, checkpoint_signal_ts AS signal_ts, checkpoint_note AS note FROM agents`).all() as typeof rows;
   } catch {
-    // pre-v3 schema: nobody can confirm; all stay "waiting"
+    try {
+      // no server from 1.6.19 has opened this file yet: the column is absent
+      rows = db.prepare(`SELECT id, NULL AS signal_ts, checkpoint_note AS note FROM agents`).all() as typeof rows;
+    } catch {
+      // older schema still: nobody can confirm; all stay "waiting"
+    }
   }
-  return prepStatus(current, stamps);
+  for (const r of rows) {
+    const c = confirmation(r.signal_ts, r.note, current.at);
+    stamps.set(r.id, c.ts);
+    timeKnown.set(r.id, c.timeKnown);
+  }
+  const status = prepStatus(current, stamps);
+  try {
+    const rows = db
+      .prepare(
+        `SELECT a.id, a.role, a.transcript_path,
+                (SELECT COUNT(*) FROM messages m WHERE m.to_agent = a.id AND m.read = 0) AS unread,
+                (SELECT COUNT(*) FROM messages m
+                  WHERE m.to_agent = a.id AND m.read = 0 AND m.priority = 'high') AS unread_high
+         FROM agents a`
+      )
+      .all() as { id: string; role: string; transcript_path: string | null; unread: number; unread_high: number }[];
+    for (const r of rows) {
+      const f: PrepFacts = {
+        checkpointTs: stamps.get(r.id) ?? null,
+        unread: r.unread,
+        unreadHigh: r.unread_high,
+        lastActivityMs: transcriptMtime(r.transcript_path),
+        confirmTimeKnown: timeKnown.get(r.id) ?? false,
+      };
+      facts.set(r.id, f);
+      // Several rows can share a role; add their unread counts together.
+      const prev = failedFacts.get(r.role);
+      failedFacts.set(r.role, {
+        checkpointTs: null,
+        lastActivityMs: null,
+        unread: (prev?.unread ?? 0) + f.unread,
+        unreadHigh: (prev?.unreadHigh ?? 0) + f.unreadHigh,
+      });
+    }
+    status.rows = prepRows(current, facts, failedFacts);
+    status.safe = prepSafe(status.rows);
+  } catch {
+    // older schema: the per-terminal view is left out, the summary still works
+  }
+  return status;
+}
+
+function transcriptMtime(file: string | null): number | null {
+  if (!file) return null;
+  try { return fs.statSync(file).mtimeMs; } catch { return null; }
 }

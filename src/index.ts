@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { findTty, psLookup } from "./tty-detect.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { execSync, execFileSync } from "child_process";
+import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -41,22 +42,11 @@ function appendCheckpointLog(line: string): void {
   }
 }
 
-// Auto-detect the controlling TTY of the parent process (Claude Code itself).
+// Auto-detect the controlling TTY of the session that started this server.
 // The MCP server's own stdin/stdout are pipes (JSON-RPC), so process.stdout.isTTY
-// is false. The parent inherits the terminal's controlling TTY, so ps against
-// the parent PID returns it. Returns "/dev/ttysNNN" or null.
+// is false. See tty-detect.ts for why ancestors beyond the parent are checked.
 function detectTty(): string | null {
-  try {
-    const tty = execSync(`ps -p ${process.ppid} -o tty=`, {
-      encoding: "utf8",
-      timeout: 1000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (!tty || tty === "??" || tty === "?") return null;
-    return tty.startsWith("/dev/") ? tty : `/dev/${tty}`;
-  } catch {
-    return null;
-  }
+  return findTty(process.ppid, psLookup);
 }
 
 function detectTerminalAppByTty(tty: string): string | null {

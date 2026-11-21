@@ -264,6 +264,20 @@ export class NexusDB {
         updated_at TEXT DEFAULT (datetime('now'))
       );
     `);
+
+    // When the agent itself last called signal_checkpoint. checkpoint_ts is
+    // also refreshed by the Stop hook at every turn end, so it cannot tell
+    // "the agent confirmed" from "a turn ended". Added outside the
+    // user_version chain like role_settings: older servers sharing this file
+    // never write it, and their terminals simply never read as confirmed.
+    const cols = this.db.prepare(`PRAGMA table_info(agents)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === "checkpoint_signal_ts")) {
+      try {
+        this.db.exec(`ALTER TABLE agents ADD COLUMN checkpoint_signal_ts INTEGER`);
+      } catch {
+        // another server added it between the check and the ALTER
+      }
+    }
   }
 
   getRoleSettings(role: string): { description: string | null; autonomousReply: boolean } | null {
@@ -655,13 +669,14 @@ export class NexusDB {
       .prepare(
         `UPDATE agents
             SET checkpoint_ts = ?,
+                checkpoint_signal_ts = ?,
                 checkpoint_safe_to_clear = ?,
                 checkpoint_handoff_path = ?,
                 checkpoint_note = ?,
                 checkpoint_consent_ts = ?
           WHERE id = ?`
       )
-      .run(nowTs, opts.safeToClear ? 1 : 0, opts.handoffPath ?? null, opts.note ?? null, consentTs, agentId);
+      .run(nowTs, nowTs, opts.safeToClear ? 1 : 0, opts.handoffPath ?? null, opts.note ?? null, consentTs, agentId);
     return r.changes > 0;
   }
 
